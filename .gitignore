@@ -1,0 +1,30 @@
+# Python bytecode & packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+
+# Virtual environments & cached wheel bundles
+.venv/
+venv/
+env/
+.build_cache/
+
+# Environment variables, credentials, and deployment outputs (NEVER COMMIT)
+.env
+.env.*
+!.env.example
+*.json.key
+*-sa-key.json
+credentials.json
+deployment_outputs.json
+
+# OS / IDE files
+.DS_Store
+.idea/
+.vscode/
+*.swp
