@@ -82,6 +82,11 @@ def setup_gecx_app(
 
     apps = requests.get(f"{ces_base}/apps", headers=headers, timeout=20).json().get("apps", [])
     display_name = "Lumiere Clinical Skincare Concierge (GECX + ADK + Cloud Run)"
+    app_description = (
+        "Customer Blueprint demonstrating Gemini Enterprise for Customer Experience (GECX) "
+        "conditionally delegating uploaded skincare images to a Google ADK Agent on Vertex AI "
+        "Agent Runtime, which invokes a Cloud Run Gemini 3.8 Flash Skincare Vision API."
+    )
     app_obj = next((a for a in apps if "Lumiere Clinical Skincare Concierge" in a.get("displayName", "")), None)
 
     var_decls = [
@@ -98,6 +103,7 @@ def setup_gecx_app(
             headers=headers,
             json={
                 "displayName": display_name,
+                "description": app_description,
                 "pinned": True,
                 "modelSettings": {"model": "gemini-3.0-flash-001"},
                 "variableDeclarations": var_decls,
@@ -120,23 +126,20 @@ def setup_gecx_app(
         for t in requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/tools", headers=headers, timeout=15).json().get("tools", [])
     }
 
+    req_tool_payload = {
+        "executionType": "SYNCHRONOUS",
+        "pythonFunction": {
+            "name": "request_skin_image_upload",
+            "description": "Prompts the customer to upload a skincare image before visual analysis.",
+            "pythonCode": REQUEST_IMAGE_UPLOAD_TOOL_CODE,
+        },
+    }
     if "request_skin_image_upload" not in existing_tools:
-        r_t1 = requests.post(
-            f"https://ces.googleapis.com/v1beta/{app_name}/tools",
-            headers=headers,
-            json={
-                "executionType": "SYNCHRONOUS",
-                "pythonFunction": {
-                    "name": "request_skin_image_upload",
-                    "description": "Prompts the customer to upload a skincare image before visual analysis.",
-                    "pythonCode": REQUEST_IMAGE_UPLOAD_TOOL_CODE,
-                },
-            },
-            timeout=20,
-        )
-        r_t1.raise_for_status()
-        existing_tools["request_skin_image_upload"] = r_t1.json()
-    tool_req_name = existing_tools["request_skin_image_upload"]["name"]
+        r_t1 = requests.post(f"https://ces.googleapis.com/v1beta/{app_name}/tools", headers=headers, json=req_tool_payload, timeout=20)
+    else:
+        r_t1 = requests.patch(f"https://ces.googleapis.com/v1beta/{existing_tools['request_skin_image_upload']['name']}", headers=headers, json=req_tool_payload, timeout=20)
+    r_t1.raise_for_status()
+    tool_req_name = r_t1.json()["name"]
 
     re_tool_payload = {
         "executionType": "SYNCHRONOUS",
@@ -164,6 +167,10 @@ def setup_gecx_app(
     root_ag = next((a for a in agents if a.get("displayName") == "lumiere_concierge_root_agent"), agents[0] if agents else None)
     ag_payload = {
         "displayName": "lumiere_concierge_root_agent",
+        "description": (
+            "Primary GECX Concierge Agent that enforces conditional delegation (skin_image_uploaded) "
+            "before invoking the Google ADK Skincare Specialist Agent on Vertex AI Agent Runtime."
+        ),
         "modelSettings": {"model": "gemini-3.0-flash-001"},
         "instruction": ROOT_AGENT_INSTRUCTION,
         "tools": [tool_req_name, tool_re_name],
@@ -178,11 +185,12 @@ def setup_gecx_app(
     root_ag_name = r_ag.json()["name"]
 
     requests.patch(
-        f"https://ces.googleapis.com/v1beta/{app_name}?updateMask=rootAgent,variableDeclarations,globalInstruction,modelSettings,pinned,displayName",
+        f"https://ces.googleapis.com/v1beta/{app_name}?updateMask=rootAgent,variableDeclarations,globalInstruction,modelSettings,pinned,displayName,description",
         headers=headers,
         json={
             "name": app_name,
             "displayName": display_name,
+            "description": app_description,
             "pinned": True,
             "rootAgent": root_ag_name,
             "variableDeclarations": var_decls,
@@ -191,6 +199,45 @@ def setup_gecx_app(
         },
         timeout=20,
     ).raise_for_status()
+
+    # Ensure published AppVersion and Deployment reflect Gemini 3.8 Flash (no legacy naming)
+    ver_display = "v1.0 - GECX + ADK + Cloud Run Gemini 3.8 Flash Blueprint"
+    r_vers = requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/versions", headers=headers, timeout=15)
+    versions = r_vers.json().get("appVersions", []) if r_vers.status_code == 200 else []
+    clean_ver = next((v for v in versions if v.get("displayName") == ver_display), None)
+    if clean_ver is None:
+        r_vc = requests.post(
+            f"https://ces.googleapis.com/v1beta/{app_name}/versions",
+            headers=headers,
+            json={
+                "displayName": ver_display,
+                "description": "Published release with conditional image delegation gate to ADK Agent Runtime + Cloud Run Gemini 3.8 Flash Vision API.",
+            },
+            timeout=20,
+        )
+        if r_vc.status_code == 200:
+            clean_ver = r_vc.json()
+
+    if clean_ver:
+        ver_name = clean_ver["name"]
+        deps = requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/deployments", headers=headers, timeout=15).json().get("deployments", [])
+        if deps:
+            requests.patch(
+                f"https://ces.googleapis.com/v1beta/{deps[0]['name']}?updateMask=appVersion",
+                headers=headers,
+                json={"name": deps[0]["name"], "appVersion": ver_name},
+                timeout=20,
+            )
+        else:
+            requests.post(
+                f"https://ces.googleapis.com/v1beta/{app_name}/deployments",
+                headers=headers,
+                json={"displayName": "Lumiere Web & API Live Deployment", "appVersion": ver_name, "channelProfile": {"channelType": "WEB_UI"}},
+                timeout=20,
+            )
+        for v in versions:
+            if v["name"] != ver_name and ("nano" in json.dumps(v).lower() or "banana" in json.dumps(v).lower()):
+                requests.delete(f"https://ces.googleapis.com/v1beta/{v['name']}", headers=headers, timeout=15)
 
     return {
         "location": ces_location,

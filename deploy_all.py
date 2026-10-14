@@ -243,11 +243,16 @@ def deploy_adk_agent_runtime(
         return env
 
     class_methods = [{"name": "query", "api_mode": ""}, {"name": "handle_a2a", "api_mode": "a2a_extension"}]
+    engine_desc = (
+        "Google ADK Skincare Specialist Agent (gemini-3.8-flash) deployed on Vertex AI "
+        "Agent Runtime calling the Cloud Run Skincare Vision API (gemini-3.8-flash)."
+    )
     engine_id = existing["name"].split("/")[-1] if existing else ""
 
     if not engine_id:
         payload = {
             "displayName": display_name,
+            "description": engine_desc,
             "spec": {
                 "serviceAccount": f"{project_number}-compute@developer.gserviceaccount.com",
                 "agentFramework": "google-adk",
@@ -270,9 +275,16 @@ def deploy_adk_agent_runtime(
             raise RuntimeError(f"ReasoningEngine creation failed: {res}")
 
     r_p = requests.patch(
-        f"{base_url}/{engine_id}?updateMask=spec.containerSpec,spec.deploymentSpec.env,spec.classMethods",
+        f"{base_url}/{engine_id}?updateMask=description,spec.containerSpec,spec.deploymentSpec.env,spec.classMethods",
         headers=headers,
-        json={"spec": {"classMethods": class_methods, "containerSpec": {"imageUri": image_uri}, "deploymentSpec": {"env": _env_list(engine_id)}}},
+        json={
+            "description": engine_desc,
+            "spec": {
+                "classMethods": class_methods,
+                "containerSpec": {"imageUri": image_uri},
+                "deploymentSpec": {"env": _env_list(engine_id)},
+            },
+        },
         timeout=30,
     )
     r_p.raise_for_status()
@@ -324,11 +336,15 @@ def main() -> None:
     engine_id = deploy_adk_agent_runtime(args.project_id, project_number, args.region, args.adk_display_name, adk_img, api_url, args.model, get_auth_headers(args.account))
 
     print(f"[7/7] Provisioning Tier 1 GECX Application ({args.ces_location}) and running E2E verification...")
-    gecx_info = setup_gecx_app(args.project_id, project_number, args.region, engine_id, args.ces_location, args.account)
-    e2e_info = run_e2e_test(args.project_id, args.ces_location, gecx_info["gecx_app_id"], args.region, engine_id, args.account)
+    locations = ["us", "eu"] if args.ces_location.lower() == "both" else [args.ces_location]
+    gecx_list = [
+        setup_gecx_app(args.project_id, project_number, args.region, engine_id, loc, args.account)
+        for loc in locations
+    ]
+    e2e_info = run_e2e_test(args.project_id, gecx_list[0]["location"], gecx_list[0]["gecx_app_id"], args.region, engine_id, args.account)
 
     print("\nDEPLOYMENT & E2E VERIFICATION SUCCEEDED:")
-    print(json.dumps({"cloud_run_api": api_url, "agent_runtime_id": engine_id, "gecx_app": gecx_info, "e2e_test": e2e_info}, indent=2))
+    print(json.dumps({"cloud_run_api": api_url, "agent_runtime_id": engine_id, "gecx_apps": gecx_list, "e2e_test": e2e_info}, indent=2))
 
 
 if __name__ == "__main__":
