@@ -216,6 +216,7 @@ def build_and_push_oci(
             "Env": [
                 "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+                "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt",
                 "PORT=8080",
                 "PYTHONPATH=/app:/app/site-packages",
             ],

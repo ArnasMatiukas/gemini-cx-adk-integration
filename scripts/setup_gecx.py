@@ -207,10 +207,11 @@ You own the clinical skin diagnosis flow and enforce the conditional image uploa
 
 def setup_gecx_app(
     project_id: str,
-    project_number: str,
+    agent_host_project_number: str,
     region: str,
     reasoning_engine_id: str,
     ces_location: str = "us",
+    caller_service_account: str | None = None,
     account: str | None = None,
 ) -> dict[str, Any]:
     """Creates or updates the GECX App, Tools, Root Agent, Version, and Deployment."""
@@ -218,7 +219,7 @@ def setup_gecx_app(
     ces_base = f"https://ces.googleapis.com/v1beta/projects/{project_id}/locations/{ces_location}"
     a2a_url = (
         f"https://{region}-aiplatform.googleapis.com/v1beta1/"
-        f"projects/{project_number}/locations/{region}/reasoningEngines/{reasoning_engine_id}/a2a/v1"
+        f"projects/{agent_host_project_number}/locations/{region}/reasoningEngines/{reasoning_engine_id}/a2a/v1"
     )
 
     apps = requests.get(f"{ces_base}/apps", headers=headers, timeout=20).json().get("apps", [])
@@ -298,20 +299,27 @@ def setup_gecx_app(
     r_t1.raise_for_status()
     tool_req_name = r_t1.json()["name"]
 
+    remote_agent_tool: dict[str, Any] = {
+        "name": "skincare_adk_agent_runtime_tool",
+        "description": "Delegates skincare image analysis to the Google ADK Agent on Vertex AI Agent Runtime.",
+        "agentCard": {
+            "name": "skincare_specialist_adk_agent_runtime",
+            "description": "ADK Skincare Specialist Agent on Vertex AI Agent Runtime.",
+            "version": "1.0.0",
+            "supportedInterfaces": [{"url": a2a_url, "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}],
+            "skills": [{"id": "skincare_visual_diagnosis", "name": "Skincare Image Analysis", "description": "Analyzes uploaded skin photos via Cloud Run Gemini 3.8 Flash API."}],
+        },
+    }
+    if caller_service_account:
+        remote_agent_tool["apiAuthentication"] = {
+            "serviceAccountAuthConfig": {
+                "serviceAccount": caller_service_account,
+            }
+        }
     re_tool_payload = {
         "executionType": "SYNCHRONOUS",
         "timeout": "60s",
-        "remoteAgentTool": {
-            "name": "skincare_adk_agent_runtime_tool",
-            "description": "Delegates skincare image analysis to the Google ADK Agent on Vertex AI Agent Runtime.",
-            "agentCard": {
-                "name": "skincare_specialist_adk_agent_runtime",
-                "description": "ADK Skincare Specialist Agent on Vertex AI Agent Runtime.",
-                "version": "1.0.0",
-                "supportedInterfaces": [{"url": a2a_url, "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}],
-                "skills": [{"id": "skincare_visual_diagnosis", "name": "Skincare Image Analysis", "description": "Analyzes uploaded skin photos via Cloud Run Gemini 3.8 Flash API."}],
-            },
-        },
+        "remoteAgentTool": remote_agent_tool,
     }
     if "skincare_adk_agent_runtime_tool" not in existing_tools:
         r_t2 = requests.post(f"https://ces.googleapis.com/v1beta/{app_name}/tools", headers=headers, json=re_tool_payload, timeout=20)
@@ -448,6 +456,7 @@ def setup_gecx_app(
                 requests.delete(f"https://ces.googleapis.com/v1beta/{v['name']}", headers=headers, timeout=15)
 
     return {
+        "gecx_project_id": project_id,
         "location": ces_location,
         "gecx_app_id": app_name.split("/")[-1],
         "gecx_app_name": app_name,
@@ -455,4 +464,5 @@ def setup_gecx_app(
         "root_agent": root_ag_name,
         "child_agents": [shopping_ag_name, skin_ag_name],
         "reasoning_engine_a2a_url": a2a_url,
+        "caller_service_account": caller_service_account or "default_ces_service_agent",
     }

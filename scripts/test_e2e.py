@@ -69,10 +69,12 @@ def run_e2e_test(
     region: str,
     reasoning_engine_id: str,
     account: str | None = None,
+    agent_host_project_id: str | None = None,
 ) -> dict[str, Any]:
     headers = get_auth_headers(account)
+    host_proj = agent_host_project_id or project_id
     session_name = f"projects/{project_id}/locations/{ces_location}/apps/{app_id}/sessions/e2e-{uuid.uuid4().hex[:8]}"
-    print(f"  -> Running Multi-Flow E2E Session: {session_name}")
+    print(f"  -> Running Multi-Flow E2E Session: {session_name} (ADK Host Project: {host_proj})")
 
     # Turn 1: General FAQ (Handled directly by GECX Root Agent, no tool delegation)
     _, t1_tools = _run_turn(session_name, [{"text": "What is Lumiere's shipping and return policy?"}], headers)
@@ -112,16 +114,42 @@ def run_e2e_test(
     assert "skincare_adk_agent_runtime_tool" in t4_tools
 
     r_sess = requests.get(
-        f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{project_id}/locations/{region}/reasoningEngines/{reasoning_engine_id}/sessions",
+        f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{host_proj}/locations/{region}/reasoningEngines/{reasoning_engine_id}/sessions",
         headers=headers,
         timeout=20,
     )
     sess_count = len(r_sess.json().get("sessions", [])) if r_sess.status_code == 200 else 0
-    print(f"  -> Verified Vertex AI Agent Engine Managed Sessions: {sess_count}")
+    print(f"  -> Verified Vertex AI Agent Engine Managed Sessions ({host_proj}): {sess_count}")
+
+    # Verify Cloud Trace spans for this ReasoningEngine across trace shards
+    trace_count = 0
+    page_token = ""
+    for _ in range(10):
+        t_url = f"https://cloudtrace.googleapis.com/v1/projects/{host_proj}/traces?view=COMPLETE&pageSize=50"
+        if page_token:
+            t_url += f"&pageToken={requests.utils.quote(page_token)}"
+        r_tr = requests.get(t_url, headers=headers, timeout=20)
+        if r_tr.status_code != 200:
+            break
+        t_data = r_tr.json()
+        for tr in t_data.get("traces", []):
+            if any(
+                reasoning_engine_id in (s.get("labels", {}).get("cloud.resource_id") or "")
+                for s in tr.get("spans", [])
+            ):
+                trace_count += 1
+        page_token = t_data.get("nextPageToken", "")
+        if not page_token:
+            break
+    print(f"  -> Verified Vertex AI Agent Engine Cloud Traces ({host_proj}): {trace_count}")
+
     return {
+        "gecx_project_id": project_id,
+        "agent_host_project_id": host_proj,
         "turn_1_faq_actions": t1_tools,
         "turn_2_shopping_flow_actions": t2_tools,
         "turn_3_no_image_gate_actions": t3_tools,
         "turn_4_image_adk_delegation_actions": t4_tools,
         "agent_engine_sessions": sess_count,
+        "agent_engine_traces": trace_count,
     }
