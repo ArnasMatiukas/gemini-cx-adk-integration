@@ -74,6 +74,9 @@ python3 deploy_all.py \
   --project-id YOUR_GCP_PROJECT_ID \
   --region europe-west1 \
   --ces-location us
+
+# Optional: Tear down all blueprint resources when finished testing:
+python3 deploy_all.py --project-id YOUR_GCP_PROJECT_ID --teardown
 ```
 
 ---

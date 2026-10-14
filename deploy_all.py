@@ -295,9 +295,46 @@ def deploy_adk_agent_runtime(
     return engine_id
 
 
+def teardown_stack(
+    project_id: str,
+    region: str,
+    repo_name: str,
+    service_name: str,
+    adk_display_name: str,
+    headers: dict[str, str],
+) -> None:
+    """Deletes all GECX, Vertex AI Agent Runtime, Cloud Run, and Artifact Registry resources for this blueprint."""
+    print(f"Tearing down blueprint stack in project '{project_id}'...")
+    for loc in ("us", "eu"):
+        r_apps = requests.get(f"https://ces.googleapis.com/v1beta/projects/{project_id}/locations/{loc}/apps", headers=headers, timeout=20)
+        for app in r_apps.json().get("apps", []):
+            if "Lumiere" not in app.get("displayName", ""):
+                continue
+            app_name = app["name"]
+            for dep in requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/deployments", headers=headers, timeout=15).json().get("deployments", []):
+                requests.delete(f"https://ces.googleapis.com/v1beta/{dep['name']}", headers=headers, timeout=15)
+            for ver in requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/versions", headers=headers, timeout=15).json().get("appVersions", []):
+                requests.delete(f"https://ces.googleapis.com/v1beta/{ver['name']}", headers=headers, timeout=15)
+            r_del = requests.delete(f"https://ces.googleapis.com/v1beta/{app_name}?force=true", headers=headers, timeout=20)
+            print(f"  -> Deleted GECX App {app_name} (HTTP {r_del.status_code})")
+
+    r_re = requests.get(f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{project_id}/locations/{region}/reasoningEngines", headers=headers, timeout=20)
+    for re_obj in r_re.json().get("reasoningEngines", []):
+        if re_obj.get("displayName") == adk_display_name or "lumiere" in re_obj.get("displayName", "").lower():
+            re_name = re_obj["name"]
+            r_del_re = requests.delete(f"https://{region}-aiplatform.googleapis.com/v1beta1/{re_name}?force=true", headers=headers, timeout=20)
+            print(f"  -> Deleted ReasoningEngine {re_name} (HTTP {r_del_re.status_code})")
+
+    r_del_cr = requests.delete(f"https://run.googleapis.com/v2/projects/{project_id}/locations/{region}/services/{service_name}", headers=headers, timeout=20)
+    print(f"  -> Deleted Cloud Run service {service_name} (HTTP {r_del_cr.status_code})")
+
+    r_del_ar = requests.delete(f"https://artifactregistry.googleapis.com/v1/projects/{project_id}/locations/{region}/repositories/{repo_name}", headers=headers, timeout=20)
+    print(f"  -> Deleted Artifact Registry repository {repo_name} (HTTP {r_del_ar.status_code})")
+
+
 def main() -> None:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Deploy GECX + ADK Agent Runtime + Cloud Run Blueprint.")
+    parser = argparse.ArgumentParser(description="Deploy or Teardown GECX + ADK Agent Runtime + Cloud Run Blueprint.")
     parser.add_argument("--project-id", default=os.environ.get("GCP_PROJECT_ID", ""))
     parser.add_argument("--region", default=os.environ.get("GCP_REGION", "europe-west1"))
     parser.add_argument("--ces-location", default=os.environ.get("CES_LOCATION", "us"))
@@ -305,6 +342,7 @@ def main() -> None:
     parser.add_argument("--api-service-name", default=os.environ.get("SKINCARE_API_SERVICE_NAME", "skincare-vision-api"))
     parser.add_argument("--adk-display-name", default=os.environ.get("ADK_AGENT_DISPLAY_NAME", "lumiere-skincare-adk-agent-runtime"))
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME", "gemini-3.8-flash"))
+    parser.add_argument("--teardown", action="store_true", help="Delete all blueprint resources from the project")
     parser.add_argument("--account", default=None)
     args = parser.parse_args()
 
@@ -312,6 +350,9 @@ def main() -> None:
         raise SystemExit("Error: specify --project-id <YOUR_GCP_PROJECT_ID> or set GCP_PROJECT_ID in .env")
 
     headers = get_auth_headers(args.account)
+    if args.teardown:
+        teardown_stack(args.project_id, args.region, args.artifact_repo, args.api_service_name, args.adk_display_name, headers)
+        return
     project_number = get_project_number(args.project_id, args.account)
 
     enable_apis(project_number, headers)
