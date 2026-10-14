@@ -93,7 +93,79 @@ python3 deploy_all.py --project-id YOUR_GCP_PROJECT_ID --teardown
 
 ---
 
-## 4. Repository Layout
+## 4. Cross-Organization Least-Privilege Authentication (Org A $\rightarrow$ Org B)
+
+To guarantee that **Org A (GECX)** can invoke **only that single ADK agent in Org B**—and has zero access to any other agents, Vertex AI models, Memory Banks, or project resources in Org B—you should combine three controls:
+
+1. **A dedicated Custom Service Account (`serviceAccountAuthConfig`) in Org A** (instead of using the shared GECX Service Agent directly).
+2. **A single-permission Custom IAM Role (`aiplatform.reasoningEngines.query` only) in Org B** (never use `roles/aiplatform.user`, which grants ~440 permissions including `.delete` on other agents and model inference across the project).
+3. **Resource-level IAM (`:setIamPolicy`) on the specific `ReasoningEngine` resource** (or an IAM Condition locked to that exact resource ID), never a project-wide binding.
+
+### Step 1: Side A (Org A — GECX Project)
+Create a dedicated, single-purpose Service Account for this integration and allow only Org A's GECX Service Agent to mint short-lived tokens for it:
+
+```bash
+# 1. Create a dedicated caller SA in Org A
+gcloud iam service-accounts create gecx-skincare-caller \
+  --display-name="GECX Caller for Org B Skincare ADK Agent" \
+  --project=<ORG_A_PROJECT_ID>
+
+# 2. Allow Org A's CES Service Agent to impersonate ONLY this SA
+gcloud iam service-accounts add-iam-policy-binding \
+  gecx-skincare-caller@<ORG_A_PROJECT_ID>.iam.gserviceaccount.com \
+  --member="serviceAccount:service-<ORG_A_PROJECT_NUMBER>@gcp-sa-ces.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --project=<ORG_A_PROJECT_ID>
+```
+
+Configure `apiAuthentication.serviceAccountAuthConfig` on the GECX `RemoteAgentTool` (or `RemoteA2aAgent`):
+
+```json
+{
+  "remoteAgentTool": {
+    "agentCard": { "...": "..." },
+    "apiAuthentication": {
+      "serviceAccountAuthConfig": {
+        "serviceAccount": "gecx-skincare-caller@<ORG_A_PROJECT_ID>.iam.gserviceaccount.com"
+      }
+    }
+  }
+}
+```
+
+### Step 2: Side B (Org B — ADK Agent Runtime Project)
+Create a custom IAM role containing **only** `aiplatform.reasoningEngines.query` and bind it directly to the single `ReasoningEngine` resource via `:setIamPolicy`:
+
+```bash
+# 1. Create a single-permission Custom IAM Role in Org B
+gcloud iam roles create singleAgentInvoker \
+  --project=<ORG_B_PROJECT_ID> \
+  --title="Single Reasoning Engine Invoker" \
+  --description="Can only invoke a specific ReasoningEngine via A2A/query" \
+  --permissions="aiplatform.reasoningEngines.query"
+
+# 2. Bind the role ONLY to the target ReasoningEngine resource (not the project)
+curl -X POST \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  "https://<REGION>-aiplatform.googleapis.com/v1beta1/projects/<ORG_B_PROJECT_ID>/locations/<REGION>/reasoningEngines/<ENGINE_ID>:setIamPolicy" \
+  -d '{
+    "policy": {
+      "bindings": [
+        {
+          "role": "projects/<ORG_B_PROJECT_ID>/roles/singleAgentInvoker",
+          "members": [
+            "serviceAccount:gecx-skincare-caller@<ORG_A_PROJECT_ID>.iam.gserviceaccount.com"
+          ]
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## 5. Repository Layout
 
 ```text
 gemini-cx-adk-integration/
