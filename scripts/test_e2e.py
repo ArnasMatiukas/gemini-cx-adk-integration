@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Live 3-Turn End-to-End Verification for GECX -> ADK Agent Runtime -> Cloud Run API."""
+"""Live 4-Turn End-to-End Verification for Multi-Flow GECX -> ADK Agent Runtime -> Cloud Run API.
+
+Verifies both distinct GECX user-journey flows:
+  - Turn 1 (Root Concierge): General store policy FAQ handled directly by `lumiere_concierge_root_agent`.
+  - Turn 2 (Flow 1 - Shopping Journey): Routes to `lumiere_shopping_agent` and calls `shop_lumiere_catalog`.
+  - Turn 3 (Flow 2 - Skin Analysis Journey, No Image): Routes to `skin_analysis_recommendation_agent`;
+    conditional gate blocks ADK delegation and calls `request_skin_image_upload`.
+  - Turn 4 (Flow 2 - Skin Analysis Journey, Image Uploaded): Condition met -> delegates to
+    `skincare_adk_agent_runtime_tool` (ADK Agent Runtime -> Cloud Run Gemini 3.8 Flash Vision API).
+"""
 
 from __future__ import annotations
 
@@ -40,7 +49,16 @@ def _run_turn(session_name: str, inputs: list[dict[str, Any]], headers: dict[str
         for msg in (out.get("diagnosticInfo") or {}).get("messages") or []:
             for chunk in msg.get("chunks") or []:
                 if tc := chunk.get("toolCall"):
-                    tools.append(tc.get("displayName") or tc.get("id") or "tool")
+                    name = (
+                        tc.get("displayName")
+                        or (tc.get("tool") or "").split("/")[-1]
+                        or tc.get("id")
+                        or "tool"
+                    )
+                    tools.append(name)
+                if at := chunk.get("agentTransfer"):
+                    target = (at.get("targetAgent") or at.get("displayName") or "agent_transfer").split("/")[-1]
+                    tools.append(f"transfer->{target}")
     return "\n".join(texts).strip(), tools
 
 
@@ -54,24 +72,34 @@ def run_e2e_test(
 ) -> dict[str, Any]:
     headers = get_auth_headers(account)
     session_name = f"projects/{project_id}/locations/{ces_location}/apps/{app_id}/sessions/e2e-{uuid.uuid4().hex[:8]}"
-    print(f"  -> Running E2E Session: {session_name}")
+    print(f"  -> Running Multi-Flow E2E Session: {session_name}")
 
-    # Turn 1: General FAQ (Handled directly by GECX, no delegation)
+    # Turn 1: General FAQ (Handled directly by GECX Root Agent, no tool delegation)
     _, t1_tools = _run_turn(session_name, [{"text": "What is Lumiere's shipping and return policy?"}], headers)
-    print(f"  [Turn 1 - General FAQ] Tools called: {t1_tools}")
+    print(f"  [Turn 1 - Root Concierge FAQ] Actions: {t1_tools}")
     assert "skincare_adk_agent_runtime_tool" not in t1_tools
 
-    # Turn 2: Skin analysis requested WITHOUT an image (Conditional gate blocks ADK delegation)
-    _, t2_tools = _run_turn(
+    # Turn 2: Flow 1 — Shopping & Catalog Journey (`lumiere_shopping_agent`)
+    t2_text, t2_tools = _run_turn(
         session_name,
-        [{"text": "My cheeks are red and flaky. Can you analyze my skin and give me a routine?"}],
+        [{"text": "I want to do some shopping. Please check the price of the Lumiere Soothing Cica-Ceramide Barrier Cream (CLN-CICA-01) and add 2 of them to my cart."}],
         headers,
     )
-    print(f"  [Turn 2 - No Image Uploaded] Tools called: {t2_tools}")
-    assert "skincare_adk_agent_runtime_tool" not in t2_tools or "request_skin_image_upload" in t2_tools
+    print(f"  [Turn 2 - Flow 1: Shopping Journey] Actions: {t2_tools}")
+    print(f"  [Turn 2 Shopping Preview]: {t2_text[:200]}...")
+    assert "shop_lumiere_catalog" in t2_tools
 
-    # Turn 3: Skincare image uploaded (Condition met -> GECX -> ADK on Agent Runtime -> Cloud Run Gemini 3.8 Flash API)
-    t3_text, t3_tools = _run_turn(
+    # Turn 3: Flow 2 — Skin Analysis Journey WITHOUT an image (Conditional gate blocks ADK delegation)
+    _, t3_tools = _run_turn(
+        session_name,
+        [{"text": "Before I check out, my cheeks are red and flaky. Can you analyze my skin and give me a personalized skincare routine?"}],
+        headers,
+    )
+    print(f"  [Turn 3 - Flow 2: Skin Analysis (No Image Uploaded)] Actions: {t3_tools}")
+    assert "skincare_adk_agent_runtime_tool" not in t3_tools
+
+    # Turn 4: Flow 2 — Skincare image uploaded (Condition met -> GECX -> ADK on Agent Runtime -> Cloud Run Gemini 3.8 Flash API)
+    t4_text, t4_tools = _run_turn(
         session_name,
         [
             {"text": "Here is a close-up photo of my cheek redness. Please analyze it and recommend a routine."},
@@ -79,9 +107,9 @@ def run_e2e_test(
         ],
         headers,
     )
-    print(f"  [Turn 3 - Image Uploaded -> 3-Tier Delegation] Tools called: {t3_tools}")
-    print(f"  [Turn 3 Response Preview]: {t3_text[:280]}...")
-    assert "skincare_adk_agent_runtime_tool" in t3_tools
+    print(f"  [Turn 4 - Flow 2: Image Uploaded -> 3-Tier Delegation] Actions: {t4_tools}")
+    print(f"  [Turn 4 Response Preview]: {t4_text[:280]}...")
+    assert "skincare_adk_agent_runtime_tool" in t4_tools
 
     r_sess = requests.get(
         f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{project_id}/locations/{region}/reasoningEngines/{reasoning_engine_id}/sessions",
@@ -90,4 +118,10 @@ def run_e2e_test(
     )
     sess_count = len(r_sess.json().get("sessions", [])) if r_sess.status_code == 200 else 0
     print(f"  -> Verified Vertex AI Agent Engine Managed Sessions: {sess_count}")
-    return {"turn_1_tools": t1_tools, "turn_2_tools": t2_tools, "turn_3_tools": t3_tools, "agent_engine_sessions": sess_count}
+    return {
+        "turn_1_faq_actions": t1_tools,
+        "turn_2_shopping_flow_actions": t2_tools,
+        "turn_3_no_image_gate_actions": t3_tools,
+        "turn_4_image_adk_delegation_actions": t4_tools,
+        "agent_engine_sessions": sess_count,
+    }

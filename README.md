@@ -1,24 +1,39 @@
 # Gemini Enterprise for Customer Experience (GECX) $\rightarrow$ ADK Agent Runtime $\rightarrow$ Cloud Run Blueprint
 
-A minimal, end-to-end reference repository showing how to connect **Gemini Enterprise for Customer Experience (GECX / `ces.googleapis.com`)** to a **Google ADK Agent** deployed on **Vertex AI Agent Runtime (`reasoningEngines`)**, which invokes a **Cloud Run Vision API** powered by **Gemini 3.8 Flash (`gemini-3.8-flash`)**.
+A minimal, end-to-end reference repository showing how **Gemini Enterprise for Customer Experience (GECX / `ces.googleapis.com`)** routes customers across **two distinct GECX user-journey flows** on the Agent Studio canvas:
+1. **Flow 1 — Shopping & Catalog Journey (`lumiere_shopping_agent`)**: Native GECX shopping specialist with catalog search, SKU pricing/ingredient lookup, cart management, and checkout (`shop_lumiere_catalog`).
+2. **Flow 2 — Visual Skin Analysis & Recommendation Journey (`skin_analysis_recommendation_agent`)**: Enforces a deterministic **Conditional Image Gate (`skin_image_uploaded`)** before delegating via **A2A (`RemoteAgentTool`)** to a **Google ADK Agent** on **Vertex AI Agent Runtime (`reasoningEngines`)**, which invokes a **Cloud Run Vision API** powered by **Gemini 3.8 Flash (`gemini-3.8-flash`)**.
 
 ---
 
-## 1. Architecture & Request Flow
+## 1. Architecture & Multi-Flow Request Topology
 
 ```mermaid
 flowchart LR
-    User(["Customer (Image + Query)"]) --> GECX
+    User(["Customer (Chat / Image)"]) --> Root
 
-    subgraph Tier1 ["Tier 1: GECX (ces.googleapis.com)"]
-        GECX["GECX Root Agent\n(lumiere_concierge_root_agent)"]
-        Gate["Conditional Image Gate\n(beforeModelCallbacks +\nbeforeToolCallbacks)"]
-        UploadTool["request_skin_image_upload"]
-        A2ATool["RemoteAgentTool (A2A v1.0)\n(skincare_adk_agent_runtime_tool)"]
+    subgraph Tier1 ["Tier 1: GECX Multi-Agent Graph (ces.googleapis.com)"]
+        Root["GECX Root Router\n(lumiere_concierge_root_agent)"]
+        
+        subgraph Flow1 ["Flow 1: Shopping Journey"]
+            ShopAgent["Shopping Sub-Agent\n(lumiere_shopping_agent)"]
+            ShopTool["shop_lumiere_catalog\n(Browse / Cart / Checkout)"]
+            ShopAgent --> ShopTool
+        end
 
-        GECX --> Gate
-        Gate -- "skin_image_uploaded == False" --> UploadTool
-        Gate -- "skin_image_uploaded == True" --> A2ATool
+        subgraph Flow2 ["Flow 2: Skin Image Recommendation Journey"]
+            SkinAgent["Skin Analysis Sub-Agent\n(skin_analysis_recommendation_agent)"]
+            Gate["Conditional Image Gate\n(beforeModelCallbacks +\nbeforeToolCallbacks)"]
+            UploadTool["request_skin_image_upload"]
+            A2ATool["RemoteAgentTool (A2A v1.0)\n(skincare_adk_agent_runtime_tool)"]
+
+            SkinAgent --> Gate
+            Gate -- "skin_image_uploaded == False" --> UploadTool
+            Gate -- "skin_image_uploaded == True" --> A2ATool
+        end
+
+        Root -- "Shopping / Cart Intent" --> ShopAgent
+        Root -- "Skin Photo / Routine Intent" --> SkinAgent
     end
 
     subgraph Tier2 ["Tier 2: Vertex AI Agent Runtime (reasoningEngines)"]
@@ -44,7 +59,9 @@ flowchart LR
 
 | Tier | Component | Runtime | Responsibility |
 | :--- | :--- | :--- | :--- |
-| **Tier 1** | **Lumiere Concierge Agent** ([`scripts/setup_gecx.py`](scripts/setup_gecx.py)) | **GECX** (`ces.googleapis.com`) | Answers store policy FAQs directly and enforces a **Conditional Delegation Gate** (`skin_image_uploaded`): blocks ADK delegation until the customer uploads a skincare image. |
+| **Tier 1 (Root)** | **Lumiere Concierge Router** (`lumiere_concierge_root_agent`) | **GECX** (`ces.googleapis.com`) | Answers store policy FAQs directly and routes the customer to either `lumiere_shopping_agent` (Flow 1) or `skin_analysis_recommendation_agent` (Flow 2) based on their user journey. |
+| **Tier 1 (Flow 1)** | **Shopping & Catalog Sub-Agent** (`lumiere_shopping_agent`) | **GECX** (`ces.googleapis.com`) | Handles catalog browsing, active ingredient & price lookups, shopping cart additions, and express checkout via `shop_lumiere_catalog`. |
+| **Tier 1 (Flow 2)** | **Skin Analysis Sub-Agent** (`skin_analysis_recommendation_agent`) | **GECX** (`ces.googleapis.com`) | Enforces a **Conditional Delegation Gate** (`skin_image_uploaded`): calls `request_skin_image_upload` if no photo is present, or delegates to the ADK Agent once an image is uploaded. |
 | **Tier 2** | **Skincare Specialist ADK Agent** ([`skincare_adk_agent/`](skincare_adk_agent/)) | **Vertex AI Agent Runtime** (`reasoningEngines`) | Built with `google-adk` (`gemini-3.8-flash`). Extracts the uploaded image from GECX's A2A metadata (`gecx_a2a_agent_context`), records **Sessions** & **Traces** in Vertex AI Agent Engine, and invokes the Cloud Run API tool. |
 | **Tier 3** | **Skincare Vision API** ([`skincare_api/`](skincare_api/)) | **Google Cloud Run** (`run.googleapis.com`) | FastAPI microservice (`POST /v1/analyze-skin`) that analyzes the image using **`gemini-3.8-flash`** with Pydantic **Structured Outputs** (`response_schema=VisualAssessment`) and matches products from the catalog. |
 
@@ -55,7 +72,7 @@ flowchart LR
 > **Instructions for AI Coding Agents (`Claude Code`, `Gemini CLI`, `Cursor`, `Jetski`)**:
 > 1. Ensure the user is authenticated (`gcloud auth login` / `gcloud auth application-default login`) and has provided a target **GCP Project ID** with billing enabled.
 > 2. Run `python3 deploy_all.py --project-id <YOUR_GCP_PROJECT_ID> --region europe-west1 --ces-location us`.
-> 3. `deploy_all.py` requires **no local Docker daemon** (it builds and pushes OCI images directly to Artifact Registry via HTTP V2 API) and automatically executes the 3-turn live E2E verification suite (`scripts/test_e2e.py`).
+> 3. `deploy_all.py` requires **no local Docker daemon** (it builds and pushes OCI images directly to Artifact Registry via HTTP V2 API) and automatically executes the 4-turn live multi-flow E2E verification suite (`scripts/test_e2e.py`).
 
 ### Prerequisites
 
@@ -83,12 +100,16 @@ python3 deploy_all.py --project-id YOUR_GCP_PROJECT_ID --teardown
 
 ## 3. How the Core Integration Patterns Work
 
-1. **Conditional Delegation Gate in GECX ([`scripts/setup_gecx.py`](scripts/setup_gecx.py))**:
+1. **Multi-Flow Journey Routing in GECX ([`scripts/setup_gecx.py`](scripts/setup_gecx.py))**:
+   - **`lumiere_concierge_root_agent`**: Connects to two distinct child agent boxes on the GECX Studio canvas (`childAgents: [lumiere_shopping_agent, skin_analysis_recommendation_agent]`) and routes customers via `{@AGENT: ...}` transfers based on their journey (shopping vs. skin image analysis).
+   - **Flow 1 (`lumiere_shopping_agent`)**: Executes catalog browsing, ingredient/price lookups, cart additions, and checkout via `shop_lumiere_catalog`.
+   - **Flow 2 (`skin_analysis_recommendation_agent`)**: Owns the clinical skin image diagnosis flow and enforces the conditional image upload gate before delegating to the ADK Agent.
+2. **Conditional Delegation Gate in GECX ([`scripts/setup_gecx.py`](scripts/setup_gecx.py))**:
    - **`beforeModelCallbacks`**: Inspects `llm_request.contents` before the model runs; as soon as an uploaded image (`inline_data`) is present in the session, it sets `callback_context.variables["skin_image_uploaded"] = True`.
-   - **`beforeToolCallbacks`**: Deterministically blocks `skincare_adk_agent_runtime_tool` if `skin_image_uploaded` is `False`, prompting the root agent to call `request_skin_image_upload` instead.
-2. **Multimodal Image Forwarding Over A2A ([`skincare_adk_agent/server.py`](skincare_adk_agent/server.py))**:
+   - **`beforeToolCallbacks`**: Deterministically blocks `skincare_adk_agent_runtime_tool` if `skin_image_uploaded` is `False`, prompting `skin_analysis_recommendation_agent` to call `request_skin_image_upload` instead.
+3. **Multimodal Image Forwarding Over A2A ([`skincare_adk_agent/server.py`](skincare_adk_agent/server.py))**:
    - When GECX invokes `RemoteAgentTool`, it attaches the multimodal conversation history inside `message.metadata["gecx_a2a_agent_context"]`. `extract_a2a_input()` extracts the base64 image from `history[].chunks[].image` and passes it to the ADK `FunctionTool`.
-3. **Agent Engine Sessions & Traces ([`skincare_adk_agent/server.py`](skincare_adk_agent/server.py))**:
+4. **Agent Engine Sessions & Traces ([`skincare_adk_agent/server.py`](skincare_adk_agent/server.py))**:
    - Uses `VertexAiSessionService` and OpenTelemetry (`OTLPSpanExporter` + `CloudTraceSpanExporter` with `cloud.platform="gcp.agent_engine"`) so every delegated conversation appears in the **Google Cloud Console $\rightarrow$ Vertex AI $\rightarrow$ Agent Engine $\rightarrow$ Sessions & Traces** tabs.
 
 ---
@@ -175,8 +196,8 @@ gemini-cx-adk-integration/
 ├── deploy_all.py                   # One-command End-to-End GCP Provisioner & Verifier
 ├── scripts/
 │   ├── oci_builder.py              # Auth helper + daemonless OCI image builder for Artifact Registry
-│   ├── setup_gecx.py               # Provisions Tier 1 GECX App, Conditional Image Gate & RemoteAgentTool
-│   └── test_e2e.py                 # Live 3-turn E2E test (FAQ -> Gate Blocked -> Image Delegated)
+│   ├── setup_gecx.py               # Provisions Tier 1 Multi-Flow GECX App (Shopping Flow + Skin Image ADK Flow)
+│   └── test_e2e.py                 # Live 4-turn E2E test (FAQ -> Shopping Flow -> Gate Blocked -> Image Delegated)
 ├── skincare_adk_agent/             # Tier 2: Google ADK Agent on Vertex AI Agent Runtime
 │   ├── Dockerfile
 │   ├── README.md
