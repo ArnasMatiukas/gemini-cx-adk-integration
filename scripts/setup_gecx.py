@@ -5,7 +5,8 @@ Configures the Multi-Flow GECX Application with a Root Concierge Router and two 
 user-journey sub-agents visible on the GECX Studio canvas:
   1. `lumiere_concierge_root_agent` (Root Router & Store Policy Concierge)
   2. `lumiere_shopping_agent` (Flow 1: Product Catalog, Cart & Checkout Journey)
-  3. `skin_analysis_recommendation_agent` (Flow 2: Conditional Skin Image Gate -> ADK Agent Runtime -> Cloud Run Gemini 3.8 Flash API)
+  3. `skin_analysis_recommendation_agent` (Flow 2: Conditional Skin Image Gate ->
+     ADK Agent Runtime Clinical Visual Diagnosis -> GECX Product & Routine Recommendation)
 """
 
 from __future__ import annotations
@@ -34,23 +35,156 @@ def before_model_callback(callback_context: CallbackContext, llm_request: LlmReq
 BEFORE_TOOL_CALLBACK_CODE = """from typing import Any, Optional
 
 def before_tool_callback(tool: Tool, input: dict[str, Any], callback_context: CallbackContext) -> Optional[dict[str, Any]]:
-  \"\"\"Hard conditional gate: blocks ADK delegation until the customer uploads a skincare image.\"\"\"
-  if tool.name == "skincare_adk_agent_runtime_tool" and not bool(callback_context.variables.get("skin_image_uploaded", False)):
-    return {
-      "result": (
-        "DELEGATION_BLOCKED: `skin_image_uploaded` is False. Do NOT delegate to the ADK agent yet. "
-        "Call `request_skin_image_upload` and ask the customer to upload a clear photo first."
-      )
-    }
+  \"\"\"Hard conditional gate enforcing the 3-step Skin Analysis & GECX Recommendation workflow:
+  1. Blocks `skincare_adk_agent_runtime_tool` and `recommend_lumiere_products` when `skin_image_uploaded` is False.
+  2. Marks `adk_diagnosis_completed = True` when `skincare_adk_agent_runtime_tool` is called with an uploaded image.
+  3. Blocks `recommend_lumiere_products` until `skincare_adk_agent_runtime_tool` has completed the visual diagnosis.
+  \"\"\"
+  has_image = bool(callback_context.variables.get("skin_image_uploaded", False))
+  if tool.name == "skincare_adk_agent_runtime_tool":
+    if not has_image:
+      return {
+        "result": (
+          "DELEGATION_BLOCKED: `skin_image_uploaded` is False. Do NOT delegate to the ADK agent yet. "
+          "Call `request_skin_image_upload` and ask the customer to upload a clear photo first."
+        )
+      }
+    callback_context.variables["adk_diagnosis_completed"] = True
+    return None
+
+  if tool.name == "recommend_lumiere_products":
+    if not has_image:
+      return {
+        "result": (
+          "RECOMMENDATION_BLOCKED: `skin_image_uploaded` is False. Call `request_skin_image_upload` "
+          "and ask the customer to upload a skin photo first."
+        )
+      }
+    if not bool(callback_context.variables.get("adk_diagnosis_completed", False)):
+      return {
+        "result": (
+          "RECOMMENDATION_BLOCKED: You must call `skincare_adk_agent_runtime_tool` first to get the "
+          "clinical visual skin diagnosis from the ADK Agent before calling `recommend_lumiere_products`."
+        )
+      }
   return None
 """
 
 REQUEST_IMAGE_UPLOAD_TOOL_CODE = """def request_skin_image_upload(reason: str = "visual_skin_analysis_required") -> dict:
-  \"\"\"Prompts the customer to upload a photo of their skin concern or skincare product.\"\"\"
+  \"\"\"Prompts the customer to upload a photo of their skin condition before clinical visual analysis.\"\"\"
   return {
     "status": "awaiting_customer_image_upload",
     "reason": reason,
     "ui_action": "PROMPT_IMAGE_UPLOAD",
+  }
+"""
+
+RECOMMEND_PRODUCTS_TOOL_CODE = """from typing import Any, Optional
+
+def recommend_lumiere_products(
+    concern_tags: str,
+    skin_type: str = "sensitive",
+    hydration_level: str = "dehydrated",
+    analysis_id: Optional[str] = None,
+) -> dict[str, Any]:
+  \"\"\"GECX Product Recommendation Engine: matches clinical skin diagnosis markers from the ADK Agent
+  against the official Lumiere Clinical Skincare catalog and builds a personalized AM/PM routine.
+
+  Args:
+    concern_tags: Comma-separated concern tags returned by `skincare_adk_agent_runtime_tool`
+      (e.g., "redness, dryness, barrier_impairment, blemishes, pores, uv_protection").
+    skin_type: Apparent skin type from the ADK visual diagnosis (e.g., "sensitive", "dry", "oily", "combination").
+    hydration_level: Hydration level from the ADK visual diagnosis (e.g., "dehydrated", "moderate", "well_hydrated").
+    analysis_id: Optional clinical `analysis_id` returned by the ADK Agent for traceability.
+  \"\"\"
+  catalog = [
+    {
+      "sku_id": "CLN-CICA-01",
+      "name": "Lumiere Soothing Cica-Ceramide Barrier Cream",
+      "category": "Moisturizer",
+      "price_usd": 48.00,
+      "size": "50ml",
+      "key_actives": ["Centella Asiatica (Cica) 5%", "Ceramide NP/AP/EOP", "Panthenol (Vitamin B5)"],
+      "tags": ["redness", "dryness", "barrier_impairment", "sensitive", "flakiness"],
+      "usage_step": "AM & PM Barrier Repair Moisturizer",
+    },
+    {
+      "sku_id": "TRM-AZEL-05",
+      "name": "Lumiere 10% Azelaic Acid Redness Relief Emulsion",
+      "category": "Treatment",
+      "price_usd": 44.00,
+      "size": "30ml",
+      "key_actives": ["Azelaic Acid 10%", "Madecassoside", "Colloidal Oatmeal"],
+      "tags": ["redness", "blemishes", "uneven_texture", "sensitive", "erythema"],
+      "usage_step": "PM Targeted Calming & Clarifying Treatment",
+    },
+    {
+      "sku_id": "SRM-NIAC-02",
+      "name": "Lumiere 10% Niacinamide + Zinc Pore Refining Serum",
+      "category": "Serum",
+      "price_usd": 38.00,
+      "size": "30ml",
+      "key_actives": ["Niacinamide 10%", "Zinc PCA 1%", "Hyaluronic Acid"],
+      "tags": ["pores", "blemishes", "oily", "uneven_texture"],
+      "usage_step": "AM/PM Pore & Sebum Balancing Serum",
+    },
+    {
+      "sku_id": "CLN-BHA-03",
+      "name": "Lumiere 2% Salicylic Acid Gentle Gel Cleanser",
+      "category": "Cleanser",
+      "price_usd": 34.00,
+      "size": "150ml",
+      "key_actives": ["Salicylic Acid (BHA) 2%", "Allantoin", "Green Tea Extract"],
+      "tags": ["blemishes", "pores", "oily", "cleanser"],
+      "usage_step": "AM & PM Gentle Clarifying Cleanser",
+    },
+    {
+      "sku_id": "SPF-MIN-04",
+      "name": "Lumiere Invisible Zinc Oxide Mineral SPF 50",
+      "category": "Sunscreen",
+      "price_usd": 42.00,
+      "size": "50ml",
+      "key_actives": ["Non-Nano Zinc Oxide 16%", "Squalane", "Bisabolol"],
+      "tags": ["uv_protection", "redness", "sensitive", "barrier_impairment"],
+      "usage_step": "AM Broad-Spectrum Mineral UV Defense",
+    },
+  ]
+  raw_tokens = {
+    t.strip().lower()
+    for t in (concern_tags or "").replace(";", ",").split(",")
+    if t.strip()
+  }
+  raw_tokens.add((skin_type or "sensitive").strip().lower())
+  if "dehydrated" in (hydration_level or "").lower():
+    raw_tokens.add("dryness")
+
+  recommended = [
+    item for item in catalog if raw_tokens.intersection(item["tags"])
+  ] or [catalog[0], catalog[1], catalog[4]]
+  if not any(p["sku_id"] == "SPF-MIN-04" for p in recommended):
+    recommended.append(catalog[4])
+
+  return {
+    "recommendation_source": "GECX_SKIN_ANALYSIS_RECOMMENDATION_AGENT",
+    "linked_adk_analysis_id": analysis_id or "verified_adk_diagnosis",
+    "matched_skin_profile": {
+      "skin_type": skin_type,
+      "hydration_level": hydration_level,
+      "targeted_concerns": sorted(raw_tokens),
+    },
+    "recommended_products": recommended,
+    "personalized_routine": {
+      "morning_am": (
+        "1. Splash with lukewarm water or gentle cleanser. "
+        "2. Apply Lumiere Soothing Cica-Ceramide Barrier Cream (CLN-CICA-01) to restore lipid barrier. "
+        "3. Finish with Lumiere Invisible Zinc Oxide Mineral SPF 50 (SPF-MIN-04)."
+      ),
+      "evening_pm": (
+        "1. Cleanse gently and pat dry. "
+        "2. Apply a thin layer of Lumiere 10% Azelaic Acid Redness Relief Emulsion (TRM-AZEL-05) to areas of redness or flakiness. "
+        "3. Seal overnight with Lumiere Soothing Cica-Ceramide Barrier Cream (CLN-CICA-01)."
+      ),
+    },
   }
 """
 
@@ -174,8 +308,8 @@ Your role is to answer general store policy questions and route customers into o
 1. **General Store Policy Questions**: Answer shipping and return policy questions directly without transferring (complimentary 2-day cold-chain shipping on orders over $50; 60-day clinical satisfaction guarantee).
 2. **Flow 1 — Shopping & Catalog Journey (`lumiere_shopping_agent`)**:
    - When the customer wants to shop, browse the product catalog, check prices/ingredients/stock, compare products, add items to their cart, or check out, immediately transfer to `{@AGENT: lumiere_shopping_agent}`.
-3. **Flow 2 — Visual Skin Analysis & Routine Recommendation Journey (`skin_analysis_recommendation_agent`)**:
-   - When the customer asks for a personalized skin analysis, skin diagnosis, or skincare routine recommendation based on their skin concern or uploaded skin photo, immediately transfer to `{@AGENT: skin_analysis_recommendation_agent}`.
+3. **Flow 2 — Visual Skin Analysis & GECX Product Recommendation Journey (`skin_analysis_recommendation_agent`)**:
+   - Whenever the customer describes a skin condition/problem, uploads a skin photo (`skin_image_uploaded == true`), or asks for a skin analysis, diagnosis, or skincare product/routine recommendation for their skin, immediately transfer to `{@AGENT: skin_analysis_recommendation_agent}`.
 </constraints>
 """
 
@@ -186,21 +320,27 @@ You are the **Lumiere Shopping & Catalog Specialist**, handling the product disc
 1. **Catalog Browsing, Product Lookup & Cart Management**:
    - Always call `{@TOOL: shop_lumiere_catalog}` to browse products, look up SKU details/prices/ingredients, add items to the cart, or generate a checkout summary.
    - Ground all SKU IDs (`CLN-CICA-01`, `SRM-NIAC-02`, `CLN-BHA-03`, `SPF-MIN-04`, `TRM-AZEL-05`), prices, and free cold-chain shipping eligibility ($50+ threshold) strictly in the tool response.
-2. **Journey Switch to Visual Skin Analysis Flow**:
-   - If the customer asks for a personalized skin analysis, diagnosis, or routine recommendation based on their skin concern or uploaded skin photo, immediately transfer to `{@AGENT: lumiere_concierge_root_agent}` so they are routed to the Skin Analysis & Recommendation flow.
+2. **Direct Journey Switch to Visual Skin Analysis Flow (`skin_analysis_recommendation_agent`)**:
+   - If the customer describes a skin condition problem (e.g., redness, flakiness, breakouts), uploads a skin photo, or asks for a personalized skin analysis or routine recommendation, immediately transfer directly to `{@AGENT: skin_analysis_recommendation_agent}`.
 </constraints>
 """
 
 SKIN_ANALYSIS_AGENT_INSTRUCTION = """<role>
-You are the **Lumiere Visual Skin Analysis & Recommendation Specialist** inside **Gemini Enterprise for Customer Experience (GECX)**.
-You own the clinical skin diagnosis flow and enforce the conditional image upload gate before delegating to the Google ADK Agent on Vertex AI Agent Runtime.
+You are the **Lumiere Visual Skin Analysis & Product Recommendation Specialist** inside **Gemini Enterprise for Customer Experience (GECX)**.
+You own the 2-step clinical skin diagnosis and GECX product recommendation workflow:
+  - **Visual Diagnosis** is delegated to the external Google ADK Agent on Vertex AI Agent Runtime (`skincare_adk_agent_runtime_tool`), which returns ONLY clinical skin findings (never product SKUs).
+  - **Product & Routine Recommendations** are performed by YOU in GECX using `{@TOOL: recommend_lumiere_products}` based on the ADK Agent's clinical findings.
 </role>
 <constraints>
-1. **Conditional Image Delegation Gate (`skin_image_uploaded`)**:
-   - **If `skin_image_uploaded == false`** and the customer asks for a personal skin analysis, diagnosis, or skincare routine: do NOT call the ADK agent. Immediately call `{@TOOL: request_skin_image_upload}` and ask the customer to upload a clear close-up photo of their skin concern first.
-   - **If `skin_image_uploaded == true`**: immediately call `{@TOOL: skincare_adk_agent_runtime_tool}` with `task` set to the customer's question, and relay the returned Gemini 3.8 Flash visual analysis (`analysis_id`, visible markers, active ingredients, AM/PM routine, and recommended Lumiere SKUs).
-2. **Journey Switch to Shopping & Cart Flow**:
-   - If the customer asks to add recommended products to their cart, browse catalog pricing, or check out, immediately transfer to `{@AGENT: lumiere_concierge_root_agent}` so they are routed to the Shopping flow.
+1. **When No Skin Photo Has Been Uploaded Yet (`skin_image_uploaded == false`)**:
+   - Do NOT call `skincare_adk_agent_runtime_tool` or `recommend_lumiere_products`.
+   - Immediately call `{@TOOL: request_skin_image_upload}` and ask the customer to upload a clear close-up photo of their skin condition so you can analyze it.
+2. **When a Skin Photo Is Uploaded (`skin_image_uploaded == true`) — Mandatory 2-Step Sequence**:
+   - **Step 1 (ADK Clinical Image Diagnosis)**: Call `{@TOOL: skincare_adk_agent_runtime_tool}` with `task` set to the customer's skin concern to obtain the clinical visual assessment (`analysis_id`, `apparent_skin_type`, `hydration_level`, `visible_markers`, `primary_concern_tags`, `key_recommended_actives`) from the ADK Agent.
+   - **Step 2 (GECX Product & Routine Recommendation)**: In the SAME turn, immediately after `skincare_adk_agent_runtime_tool` returns the clinical diagnosis, call `{@TOOL: recommend_lumiere_products}` passing the returned `concern_tags`, `skin_type`, `hydration_level`, and `analysis_id` so GECX selects the matching Lumiere catalog SKUs (`CLN-CICA-01`, `TRM-AZEL-05`, `SPF-MIN-04`, etc.) and AM/PM routine.
+   - Present both (a) the ADK Clinical Visual Assessment (`analysis_id`, visible markers, target actives) and (b) your GECX Personalized Product & Routine Recommendations (`sku_id`, product name, price, and AM/PM steps from `recommend_lumiere_products`).
+3. **Cart & Checkout Assistance**:
+   - After presenting the GECX product recommendations, ask the customer if they would like to add the recommended items to their shopping cart.
 </constraints>
 """
 
@@ -214,7 +354,7 @@ def setup_gecx_app(
     caller_service_account: str | None = None,
     account: str | None = None,
 ) -> dict[str, Any]:
-    """Creates or updates the GECX App, Tools, Root Agent, Version, and Deployment."""
+    """Creates or updates the GECX App, Tools, Root & Child Agents, Version, and Deployment."""
     headers = get_auth_headers(account)
     ces_base = f"https://ces.googleapis.com/v1beta/projects/{project_id}/locations/{ces_location}"
     a2a_url = (
@@ -227,8 +367,9 @@ def setup_gecx_app(
     app_description = (
         "Multi-Flow Customer Blueprint demonstrating Gemini Enterprise for Customer Experience (GECX) "
         "routing between two distinct user-journey flows: (1) Shopping & Catalog Concierge, and "
-        "(2) Visual Skin Analysis & Routine Recommendation (conditionally delegating uploaded skin "
-        "photos to a Google ADK Agent on Vertex AI Agent Runtime + Cloud Run Gemini 3.8 Flash API)."
+        "(2) Visual Skin Analysis & GECX Product Recommendation (delegating clinical image diagnosis to "
+        "an ADK Agent on Vertex AI Agent Runtime + Cloud Run Gemini 3.8 Flash API, then recommending "
+        "products inside GECX via `recommend_lumiere_products`)."
     )
     app_obj = next((a for a in apps if "Lumiere Clinical Skincare Concierge" in a.get("displayName", "")), None)
 
@@ -237,7 +378,12 @@ def setup_gecx_app(
             "name": "skin_image_uploaded",
             "description": "True when the customer has uploaded a skincare image in the session.",
             "schema": {"type": "BOOLEAN", "default": False},
-        }
+        },
+        {
+            "name": "adk_diagnosis_completed",
+            "description": "True once the ADK Agent Runtime has completed clinical visual skin analysis for the uploaded image.",
+            "schema": {"type": "BOOLEAN", "default": False},
+        },
     ]
 
     if app_obj is None:
@@ -250,7 +396,10 @@ def setup_gecx_app(
                 "pinned": True,
                 "modelSettings": {"model": "gemini-3.0-flash-001"},
                 "variableDeclarations": var_decls,
-                "globalInstruction": "SESSION STATE: skin_image_uploaded={skin_image_uploaded}",
+                "globalInstruction": (
+                    "SESSION STATE: skin_image_uploaded={skin_image_uploaded}, "
+                    "adk_diagnosis_completed={adk_diagnosis_completed}"
+                ),
                 "loggingSettings": {"cloudLoggingSettings": {"enableCloudLogging": True}},
                 "timeZoneSettings": {"timeZone": "America/Los_Angeles"},
             },
@@ -299,15 +448,43 @@ def setup_gecx_app(
     r_t1.raise_for_status()
     tool_req_name = r_t1.json()["name"]
 
+    rec_tool_payload = {
+        "executionType": "SYNCHRONOUS",
+        "pythonFunction": {
+            "name": "recommend_lumiere_products",
+            "description": (
+                "GECX Product Recommendation Engine: takes the clinical `concern_tags`, `skin_type`, and "
+                "`hydration_level` returned by `skincare_adk_agent_runtime_tool` and recommends matched "
+                "Lumiere catalog SKUs (`CLN-CICA-01`, `TRM-AZEL-05`, `SPF-MIN-04`, etc.) and an AM/PM routine."
+            ),
+            "pythonCode": RECOMMEND_PRODUCTS_TOOL_CODE,
+        },
+    }
+    if "recommend_lumiere_products" not in existing_tools:
+        r_t_rec = requests.post(f"https://ces.googleapis.com/v1beta/{app_name}/tools", headers=headers, json=rec_tool_payload, timeout=20)
+    else:
+        r_t_rec = requests.patch(f"https://ces.googleapis.com/v1beta/{existing_tools['recommend_lumiere_products']['name']}", headers=headers, json=rec_tool_payload, timeout=20)
+    r_t_rec.raise_for_status()
+    tool_rec_name = r_t_rec.json()["name"]
+
     remote_agent_tool: dict[str, Any] = {
         "name": "skincare_adk_agent_runtime_tool",
-        "description": "Delegates skincare image analysis to the Google ADK Agent on Vertex AI Agent Runtime.",
+        "description": (
+            "Delegates clinical visual skin diagnosis of the uploaded photo to the Google ADK Agent on "
+            "Vertex AI Agent Runtime. Returns ONLY clinical dermatology markers and concern tags (no product SKUs)."
+        ),
         "agentCard": {
             "name": "skincare_specialist_adk_agent_runtime",
-            "description": "ADK Skincare Specialist Agent on Vertex AI Agent Runtime.",
-            "version": "1.0.0",
+            "description": "ADK Clinical Dermatology Visual Diagnosis Agent on Vertex AI Agent Runtime.",
+            "version": "2.0.0",
             "supportedInterfaces": [{"url": a2a_url, "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}],
-            "skills": [{"id": "skincare_visual_diagnosis", "name": "Skincare Image Analysis", "description": "Analyzes uploaded skin photos via Cloud Run Gemini 3.8 Flash API."}],
+            "skills": [
+                {
+                    "id": "skincare_visual_diagnosis",
+                    "name": "Clinical Skin Image Diagnosis",
+                    "description": "Analyzes uploaded skin photos via Cloud Run Gemini 3.8 Flash API and returns clinical markers and concern tags.",
+                }
+            ],
         },
     }
     if caller_service_account:
@@ -331,43 +508,70 @@ def setup_gecx_app(
     agents = requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/agents", headers=headers, timeout=15).json().get("agents", [])
     by_display = {a.get("displayName"): a for a in agents}
 
-    # Flow 1 Sub-Agent: Shopping & Catalog Journey
+    # Ensure both sub-agents exist first so they can reference each other in childAgents
     shopping_ag = by_display.get("lumiere_shopping_agent")
+    if shopping_ag is None:
+        shopping_ag = requests.post(
+            f"https://ces.googleapis.com/v1beta/{app_name}/agents",
+            headers=headers,
+            json={"displayName": "lumiere_shopping_agent", "modelSettings": {"model": "gemini-3.0-flash-001"}},
+            timeout=20,
+        ).json()
+    shopping_ag_name = shopping_ag["name"]
+
+    skin_ag = by_display.get("skin_analysis_recommendation_agent")
+    if skin_ag is None:
+        skin_ag = requests.post(
+            f"https://ces.googleapis.com/v1beta/{app_name}/agents",
+            headers=headers,
+            json={"displayName": "skin_analysis_recommendation_agent", "modelSettings": {"model": "gemini-3.0-flash-001"}},
+            timeout=20,
+        ).json()
+    skin_ag_name = skin_ag["name"]
+
+    # Flow 1 Sub-Agent: Shopping & Catalog Journey (can transfer directly to skin_analysis_recommendation_agent)
     shopping_payload = {
         "displayName": "lumiere_shopping_agent",
         "description": "Flow 1: Lumiere Shopping & Catalog Specialist handling product browsing, SKU comparisons, cart additions, and checkout.",
         "modelSettings": {"model": "gemini-3.0-flash-001"},
         "instruction": SHOPPING_AGENT_INSTRUCTION,
         "tools": [tool_shop_name],
+        "childAgents": [skin_ag_name],
         "beforeModelCallbacks": [{"description": "Sets skin_image_uploaded=True when an image is uploaded.", "pythonCode": BEFORE_MODEL_CALLBACK_CODE}],
     }
-    if shopping_ag is None:
-        r_shop = requests.post(f"https://ces.googleapis.com/v1beta/{app_name}/agents", headers=headers, json=shopping_payload, timeout=20)
-    else:
-        r_shop = requests.patch(f"https://ces.googleapis.com/v1beta/{shopping_ag['name']}", headers=headers, json=shopping_payload, timeout=20)
-    r_shop.raise_for_status()
-    shopping_ag_name = r_shop.json()["name"]
+    requests.patch(
+        f"https://ces.googleapis.com/v1beta/{shopping_ag_name}?updateMask=displayName,description,modelSettings,instruction,tools,childAgents,beforeModelCallbacks",
+        headers=headers,
+        json=shopping_payload,
+        timeout=20,
+    ).raise_for_status()
 
-    # Flow 2 Sub-Agent: Visual Skin Analysis & ADK Recommendation Journey
-    skin_ag = by_display.get("skin_analysis_recommendation_agent")
+    # Flow 2 Sub-Agent: Visual Skin Analysis (ADK) & Product Recommendation (GECX) Journey
     skin_payload = {
         "displayName": "skin_analysis_recommendation_agent",
         "description": (
-            "Flow 2: Visual Skin Analysis & Routine Recommendation Specialist that enforces conditional "
-            "image delegation (skin_image_uploaded) before invoking the Google ADK Agent on Vertex AI Agent Runtime."
+            "Flow 2: Visual Skin Analysis & GECX Product Recommendation Specialist. Requests an image if "
+            "missing, delegates clinical visual diagnosis to the ADK Agent (`skincare_adk_agent_runtime_tool`), "
+            "and then recommends Lumiere products inside GECX via `recommend_lumiere_products`."
         ),
         "modelSettings": {"model": "gemini-3.0-flash-001"},
         "instruction": SKIN_ANALYSIS_AGENT_INSTRUCTION,
-        "tools": [tool_req_name, tool_re_name],
+        "tools": [tool_req_name, tool_re_name, tool_rec_name],
+        "childAgents": [],
         "beforeModelCallbacks": [{"description": "Sets skin_image_uploaded=True when an image is uploaded.", "pythonCode": BEFORE_MODEL_CALLBACK_CODE}],
-        "beforeToolCallbacks": [{"description": "Blocks ADK delegation if skin_image_uploaded is False.", "pythonCode": BEFORE_TOOL_CALLBACK_CODE}],
+        "beforeToolCallbacks": [
+            {
+                "description": "Enforces image upload before ADK diagnosis and ADK diagnosis before GECX product recommendation.",
+                "pythonCode": BEFORE_TOOL_CALLBACK_CODE,
+            }
+        ],
     }
-    if skin_ag is None:
-        r_skin = requests.post(f"https://ces.googleapis.com/v1beta/{app_name}/agents", headers=headers, json=skin_payload, timeout=20)
-    else:
-        r_skin = requests.patch(f"https://ces.googleapis.com/v1beta/{skin_ag['name']}", headers=headers, json=skin_payload, timeout=20)
-    r_skin.raise_for_status()
-    skin_ag_name = r_skin.json()["name"]
+    requests.patch(
+        f"https://ces.googleapis.com/v1beta/{skin_ag_name}?updateMask=displayName,description,modelSettings,instruction,tools,childAgents,beforeModelCallbacks,beforeToolCallbacks",
+        headers=headers,
+        json=skin_payload,
+        timeout=20,
+    ).raise_for_status()
 
     # Root Agent: Concierge Router linking to both child agent flows
     root_ag = by_display.get("lumiere_concierge_root_agent") or (agents[0] if agents else None)
@@ -407,13 +611,16 @@ def setup_gecx_app(
             "rootAgent": root_ag_name,
             "variableDeclarations": var_decls,
             "modelSettings": {"model": "gemini-3.0-flash-001"},
-            "globalInstruction": "SESSION STATE: skin_image_uploaded={skin_image_uploaded}",
+            "globalInstruction": (
+                "SESSION STATE: skin_image_uploaded={skin_image_uploaded}, "
+                "adk_diagnosis_completed={adk_diagnosis_completed}"
+            ),
         },
         timeout=20,
     ).raise_for_status()
 
     # Publish Multi-Flow AppVersion and update live Deployment
-    ver_display = "v2.0 - Multi-Flow GECX (Shopping + Skin Image ADK Analysis)"
+    ver_display = "v3.0 - Multi-Flow GECX (ADK Visual Diagnosis + GECX Product Recommendation)"
     r_vers = requests.get(f"https://ces.googleapis.com/v1beta/{app_name}/versions", headers=headers, timeout=15)
     versions = r_vers.json().get("appVersions", []) if r_vers.status_code == 200 else []
     clean_ver = next((v for v in versions if v.get("displayName") == ver_display), None)
@@ -424,9 +631,9 @@ def setup_gecx_app(
             json={
                 "displayName": ver_display,
                 "description": (
-                    "Multi-flow release with Root Concierge Router branching into "
-                    "(1) lumiere_shopping_agent and (2) skin_analysis_recommendation_agent "
-                    "(conditional image gate -> ADK Agent Runtime -> Cloud Run Gemini 3.8 Flash Vision API)."
+                    "Multi-flow release: (1) lumiere_shopping_agent and (2) skin_analysis_recommendation_agent "
+                    "(requests image -> delegates clinical visual diagnosis to ADK Agent Runtime -> recommends "
+                    "Lumiere products in GECX via `recommend_lumiere_products`)."
                 ),
             },
             timeout=20,
@@ -451,9 +658,6 @@ def setup_gecx_app(
                 json={"displayName": "Lumiere Web & API Live Deployment", "appVersion": ver_name, "channelProfile": {"channelType": "WEB_UI"}},
                 timeout=20,
             )
-        for v in versions:
-            if v["name"] != ver_name and ("nano" in json.dumps(v).lower() or "banana" in json.dumps(v).lower()):
-                requests.delete(f"https://ces.googleapis.com/v1beta/{v['name']}", headers=headers, timeout=15)
 
     return {
         "gecx_project_id": project_id,

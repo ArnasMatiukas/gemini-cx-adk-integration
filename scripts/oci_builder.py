@@ -87,6 +87,19 @@ def get_auth_headers(account: str | None = None, content_type: str | None = "app
         except Exception:
             token = _gcloud_sqlite_token(account)
     if not token:
+        sa_key = Path.home() / ".config" / "gcloud" / "argolis-sa-key.json"
+        if sa_key.exists():
+            try:
+                from google.oauth2 import service_account
+
+                sa_creds = service_account.Credentials.from_service_account_file(
+                    str(sa_key), scopes=[CLOUD_PLATFORM_SCOPE]
+                )
+                sa_creds.refresh(google.auth.transport.requests.Request())
+                token = sa_creds.token
+            except Exception:
+                pass
+    if not token:
         cmd = ["gcloud", "auth", "print-access-token"] + (["--account", account] if account else [])
         token = subprocess.check_output(cmd, text=True, timeout=15).strip()
     headers = {"Authorization": f"Bearer {token}"}

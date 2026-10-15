@@ -390,6 +390,7 @@ def deploy_adk_agent_runtime(
             {"name": "AGENT_ENGINE_LOCATION", "value": region},
             {"name": "ADK_MODEL_NAME", "value": model_name},
             {"name": "SKINCARE_API_URL", "value": api_url},
+            {"name": "CONTAINER_REVISION_TS", "value": str(int(time.time()))},
         ]
         if engine_id:
             env.append({"name": "AGENT_ENGINE_ID", "value": engine_id})

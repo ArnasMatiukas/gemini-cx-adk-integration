@@ -2,7 +2,10 @@
 
 A minimal, end-to-end reference repository showing how **Gemini Enterprise for Customer Experience (GECX / `ces.googleapis.com`)** routes customers across **two distinct GECX user-journey flows** on the Agent Studio canvas and invokes a **Google ADK Agent** on **Vertex AI Agent Runtime (`reasoningEngines`)** across project/organization boundaries with **maximum least-privilege security**:
 1. **Flow 1 — Shopping & Catalog Journey (`lumiere_shopping_agent`)**: Native GECX shopping specialist with catalog search, SKU pricing/ingredient lookup, cart management, and checkout (`shop_lumiere_catalog`).
-2. **Flow 2 — Visual Skin Analysis & Recommendation Journey (`skin_analysis_recommendation_agent`)**: Enforces a deterministic **Conditional Image Gate (`skin_image_uploaded`)** before delegating via **A2A (`RemoteAgentTool`)** using a dedicated custom caller Service Account (`serviceAccountAuthConfig`) and a single-permission custom IAM role (`aiplatform.reasoningEngines.query`) bound exclusively at the `ReasoningEngine` resource level to a **Google ADK Agent** on **Vertex AI Agent Runtime**, which invokes a **Cloud Run Vision API** powered by **Gemini 3.8 Flash (`gemini-3.8-flash`)**.
+2. **Flow 2 — Visual Skin Analysis & GECX Product Recommendation Journey (`skin_analysis_recommendation_agent`)**:
+   - **Step A (No Image Uploaded)**: Enforces a deterministic **Conditional Image Gate (`skin_image_uploaded`)** and calls `request_skin_image_upload` to ask the customer for a photo of their skin condition.
+   - **Step B (Image Uploaded — ADK Clinical Diagnosis)**: Delegates visual skin diagnosis via **A2A (`RemoteAgentTool`)** using a dedicated custom caller Service Account (`serviceAccountAuthConfig`) and a single-permission custom IAM role (`aiplatform.reasoningEngines.query`) bound exclusively at the `ReasoningEngine` resource level to a **Google ADK Agent** on **Vertex AI Agent Runtime**, which invokes a **Cloud Run Vision API** powered by **Gemini 3.8 Flash (`gemini-3.8-flash`)**. The ADK Agent returns **ONLY** the clinical visual diagnosis (`analysis_id`, `visible_markers`, `primary_concern_tags`, `key_recommended_actives`)—never product SKUs.
+   - **Step C (GECX Product Recommendation)**: After receiving the ADK clinical diagnosis (`adk_diagnosis_completed == True`), **GECX's `skin_analysis_recommendation_agent` itself** calls `recommend_lumiere_products` inside GECX to match the clinical findings against the official GECX Lumiere product catalog (`CLN-CICA-01`, `TRM-AZEL-05`, `SPF-MIN-04`, etc.) and recommend a personalized AM/PM routine.
 
 ---
 
@@ -23,14 +26,16 @@ flowchart LR
 
         subgraph Flow2 ["Flow 2: Skin Image Recommendation Journey"]
             SkinAgent["Skin Analysis Sub-Agent\n(skin_analysis_recommendation_agent)"]
-            Gate["Conditional Image Gate\n(beforeModelCallbacks +\nbeforeToolCallbacks)"]
-            UploadTool["request_skin_image_upload"]
-            A2ATool["RemoteAgentTool (A2A v1.0)\n(skincare_adk_agent_runtime_tool)"]
+            Gate["Conditional Gate\n(beforeModelCallbacks +\nbeforeToolCallbacks)"]
+            UploadTool["1. request_skin_image_upload"]
+            A2ATool["2. RemoteAgentTool (A2A v1.0)\n(skincare_adk_agent_runtime_tool)"]
+            RecTool["3. recommend_lumiere_products\n(GECX Product Recommender)"]
             CallerSA["Custom Caller SA\n(gecx-skincare-caller@ProjA)"]
 
             SkinAgent --> Gate
             Gate -- "skin_image_uploaded == False" --> UploadTool
-            Gate -- "skin_image_uploaded == True" --> A2ATool
+            Gate -- "1. skin_image_uploaded == True" --> A2ATool
+            Gate -- "2. adk_diagnosis_completed == True" --> RecTool
             A2ATool --> CallerSA
         end
 
@@ -67,9 +72,9 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | **Project A — Tier 1 (Root)** | **Lumiere Concierge Router** (`lumiere_concierge_root_agent`) | **GECX** (`ces.googleapis.com`) | Answers store policy FAQs directly and routes the customer to either `lumiere_shopping_agent` (Flow 1) or `skin_analysis_recommendation_agent` (Flow 2) based on their user journey. |
 | **Project A — Tier 1 (Flow 1)** | **Shopping & Catalog Sub-Agent** (`lumiere_shopping_agent`) | **GECX** (`ces.googleapis.com`) | Handles catalog browsing, active ingredient & price lookups, shopping cart additions, and express checkout via `shop_lumiere_catalog`. |
-| **Project A — Tier 1 (Flow 2)** | **Skin Analysis Sub-Agent** (`skin_analysis_recommendation_agent`) | **GECX** (`ces.googleapis.com`) | Enforces a **Conditional Delegation Gate** (`skin_image_uploaded`): calls `request_skin_image_upload` if no photo is present, or delegates to Project B's ADK Agent via `gecx-skincare-caller` once an image is uploaded. |
-| **Project B — Tier 2** | **Skincare Specialist ADK Agent** ([`skincare_adk_agent/`](skincare_adk_agent/)) | **Vertex AI Agent Runtime** (`reasoningEngines`) | Built with `google-adk` (`gemini-3.8-flash`). Extracts the uploaded image from GECX's A2A metadata (`gecx_a2a_agent_context`), records **Sessions**, **Traces**, **Logs**, and **Metrics** in Vertex AI Agent Engine (`GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true`), and invokes the Cloud Run API tool. |
-| **Project B — Tier 3** | **Skincare Vision API** ([`skincare_api/`](skincare_api/)) | **Google Cloud Run** (`run.googleapis.com`) | FastAPI microservice (`POST /v1/analyze-skin`) that analyzes the image using **`gemini-3.8-flash`** with Pydantic **Structured Outputs** (`response_schema=VisualAssessment`) and matches products from the catalog. |
+| **Project A — Tier 1 (Flow 2)** | **Skin Analysis & Product Recommendation Sub-Agent** (`skin_analysis_recommendation_agent`) | **GECX** (`ces.googleapis.com`) | Enforces a **Conditional Gate**: (1) calls `request_skin_image_upload` if no photo is present; (2) once an image is uploaded, delegates visual diagnosis to Project B's ADK Agent (`skincare_adk_agent_runtime_tool`); (3) calls `recommend_lumiere_products` inside GECX to recommend Lumiere catalog SKUs based on the ADK clinical diagnosis. |
+| **Project B — Tier 2** | **Clinical Diagnosis ADK Agent** ([`skincare_adk_agent/`](skincare_adk_agent/)) | **Vertex AI Agent Runtime** (`reasoningEngines`) | Built with `google-adk` (`gemini-3.8-flash`). Extracts the uploaded image from GECX's A2A metadata (`gecx_a2a_agent_context`), records **Sessions**, **Traces**, **Logs**, and **Metrics** in Vertex AI Agent Engine (`GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true`), invokes the Cloud Run Vision API, and returns **ONLY** the clinical visual diagnosis (no commercial product SKUs). |
+| **Project B — Tier 3** | **Skincare Vision API** ([`skincare_api/`](skincare_api/)) | **Google Cloud Run** (`run.googleapis.com`) | FastAPI microservice (`POST /v1/analyze-skin`) that analyzes the image using **`gemini-3.8-flash`** with Pydantic **Structured Outputs** (`response_schema=VisualAssessment`) and returns clinical dermatology markers, concern tags, and target active ingredients. |
 
 ---
 

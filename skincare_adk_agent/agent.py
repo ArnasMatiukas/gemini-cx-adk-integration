@@ -1,4 +1,11 @@
-"""Tier 2: Google ADK Skincare Specialist Agent (`root_agent`) and Cloud Run Tool."""
+"""Tier 2: Google ADK Clinical Skin Diagnosis Agent (`root_agent`) and Cloud Run Tool.
+
+This ADK agent is strictly responsible for clinical visual skin analysis via the Tier 3
+Cloud Run Vision API (`gemini-3.8-flash`). It returns ONLY the visual dermatology diagnosis
+(`analysis_id`, `apparent_skin_type`, `hydration_level`, `visible_markers`, `primary_concern_tags`,
+`key_recommended_actives`, and `visual_summary`) and never recommends commercial products or SKUs.
+Product recommendations are performed by the Tier 1 GECX `skin_analysis_recommendation_agent`.
+"""
 
 from __future__ import annotations
 
@@ -54,7 +61,7 @@ def analyze_skincare_image_on_cloud_run(
     user_query: str,
     tool_context: ToolContext | None = None,
 ) -> dict[str, Any]:
-    """Calls the Tier 3 Cloud Run Skincare Vision API (`gemini-3.8-flash`) to analyze the uploaded image."""
+    """Calls the Tier 3 Cloud Run Skincare Vision API (`gemini-3.8-flash`) to analyze the uploaded skin image."""
     image_b64 = CURRENT_IMAGE_B64.get()
     mime_type = CURRENT_IMAGE_MIME.get()
     if not image_b64:
@@ -83,14 +90,18 @@ def analyze_skincare_image_on_cloud_run(
 root_agent = Agent(
     name="skincare_specialist_adk_agent",
     model=ADK_MODEL,
-    description="Clinical Skincare Specialist ADK Agent that delegates image analysis to the Cloud Run Vision API.",
+    description="Clinical Dermatology Visual Diagnosis ADK Agent that delegates image analysis to the Cloud Run Vision API.",
     instruction=(
-        "You are the Lumiere Clinical Skincare Specialist ADK Agent (`gemini-3.8-flash`), invoked via A2A "
+        "You are the Clinical Dermatology Visual Diagnosis ADK Agent (`gemini-3.8-flash`), invoked via A2A "
         "from Gemini Enterprise for Customer Experience (GECX).\n"
-        "1. Always call `analyze_skincare_image_on_cloud_run` first to analyze the customer's uploaded skin/product photo.\n"
-        "2. Present the returned `analysis_id`, `model_used`, visual assessment markers, recommended active ingredients, "
-        "matched Lumiere SKUs (`recommended_regimen`), and AM/PM routine concisely and objectively."
+        "1. Always call `analyze_skincare_image_on_cloud_run` first to analyze the customer's uploaded skin photo.\n"
+        "2. Return ONLY the objective clinical visual diagnosis from the tool: `analysis_id`, `model_used`, "
+        "`apparent_skin_type`, `hydration_level`, `visible_markers`, `primary_concern_tags`, "
+        "`key_recommended_actives`, and `visual_summary`.\n"
+        "3. STRICT BOUNDARY: Do NOT recommend or mention any commercial product names, SKUs, prices, or shopping "
+        "regimens. Product selection and routine recommendation are handled exclusively by the GECX "
+        "`skin_analysis_recommendation_agent` after it receives your clinical diagnosis."
     ),
     tools=[analyze_skincare_image_on_cloud_run],
-    generate_content_config=types.GenerateContentConfig(temperature=0.2),
+    generate_content_config=types.GenerateContentConfig(temperature=0.1),
 )

@@ -241,7 +241,7 @@ async def handle_a2a_send(request: Request) -> JSONResponse:
     tok_mime = CURRENT_IMAGE_MIME.set(mime_type)
     try:
         prompt = (
-            f"{user_text}\n[Customer uploaded a {mime_type} skincare image. Call `analyze_skincare_image_on_cloud_run` now.]"
+            f"{user_text}\n[Customer uploaded a {mime_type} skincare image. Call `analyze_skincare_image_on_cloud_run` now and return ONLY the clinical visual diagnosis (analysis_id, apparent_skin_type, hydration_level, visible_markers, primary_concern_tags, key_recommended_actives, visual_summary) with zero product/SKU recommendations.]"
             if image_b64
             else user_text
         )

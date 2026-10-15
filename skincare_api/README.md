@@ -6,7 +6,7 @@ A minimal FastAPI microservice on **Google Cloud Run** that analyzes customer-up
 
 1. The **Google ADK Agent** (Tier 2) calls `POST /v1/analyze-skin` with an OIDC ID token and `{ "image_base64": "...", "mime_type": "image/png", "user_query": "..." }`.
 2. [`app.py`](app.py) invokes `gemini-3.8-flash` (`location="global"`) with native **Structured Outputs** (`response_mime_type="application/json"`, `response_schema=VisualAssessment`).
-3. Detected concern tags are matched against `SKINCARE_CATALOG` and returned as JSON (`analysis_id`, `model_used`, `visual_assessment`, `recommended_regimen`).
+3. Returns the clinical visual assessment (`analysis_id`, `model_used`, `visual_assessment`: `apparent_skin_type`, `hydration_level`, `visible_markers`, `primary_concern_tags`, `key_recommended_actives`, `visual_summary`) with zero commercial product SKUs (product matching is owned by the Tier 1 GECX `skin_analysis_recommendation_agent`).
 
 ## Local Run
 
