@@ -136,7 +136,6 @@ from skincare_adk_agent.agent import (
     ADK_MODEL,
     CURRENT_IMAGE_B64,
     CURRENT_IMAGE_MIME,
-    SKINCARE_API_URL,
     root_agent,
 )
 
@@ -202,7 +201,7 @@ def extract_a2a_input(payload: dict[str, Any]) -> tuple[str, str | None, str, st
 @app.get("/")
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "adk_model": ADK_MODEL, "skincare_api_url": SKINCARE_API_URL}
+    return {"status": "ok", "adk_model": ADK_MODEL}
 
 
 @app.get("/.well-known/agent-card.json")
@@ -210,8 +209,8 @@ async def health() -> dict[str, str]:
 async def agent_card(request: Request) -> dict[str, Any]:
     return {
         "name": "skincare_specialist_adk_agent",
-        "description": "Google ADK Skincare Specialist Agent calling Cloud Run Vision API.",
-        "version": "1.0.0",
+        "description": "Google ADK Clinical Skin Diagnosis Agent (gemini-3.8-flash) identifying what is wrong with the skin without recommending products.",
+        "version": "2.0.0",
         "supportedInterfaces": [
             {"url": str(request.base_url).rstrip("/"), "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}
         ],
@@ -241,7 +240,7 @@ async def handle_a2a_send(request: Request) -> JSONResponse:
     tok_mime = CURRENT_IMAGE_MIME.set(mime_type)
     try:
         prompt = (
-            f"{user_text}\n[Customer uploaded a {mime_type} skincare image. Call `analyze_skincare_image_on_cloud_run` now and return ONLY the clinical visual diagnosis (analysis_id, apparent_skin_type, hydration_level, visible_markers, primary_concern_tags, key_recommended_actives, visual_summary) with zero product/SKU recommendations.]"
+            f"{user_text}\n[Customer uploaded a {mime_type} skincare image. Call `analyze_skin_condition_image` now and return ONLY the clinical visual diagnosis identifying what is wrong with the skin (analysis_id, apparent_skin_type, hydration_level, visible_markers, primary_concern_tags, key_recommended_actives, visual_summary) with zero commercial product/SKU recommendations.]"
             if image_b64
             else user_text
         )

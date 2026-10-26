@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""End-to-End Provisioner & Verifier for the 3-Tier GECX + ADK Agent Runtime + Cloud Run Blueprint.
+"""End-to-End Provisioner & Verifier for the 2-Tier GECX + ADK Agent Runtime Blueprint.
 
 Supports both Single-Project deployment and 2-Project Cross-Boundary Least-Privilege deployment:
-  - Agent Host Project (`--project-id`): Hosts Tier 3 Cloud Run Vision API + Tier 2 ADK Agent Runtime.
-  - GECX Front-End Project (`--gecx-project-id`): Hosts Tier 1 GECX Multi-Flow App (`ces.googleapis.com`)
-    authenticating to the single ReasoningEngine via a dedicated custom Service Account + 1-permission
-    custom IAM role (`aiplatform.reasoningEngines.query`) bound exclusively at the ReasoningEngine resource level.
+  - Agent Host Project (`--project-id`): Hosts the Google ADK Agent (`skincare_specialist_adk_agent`)
+    on Vertex AI Agent Runtime (`ReasoningEngine`), which performs clinical visual skin analysis
+    directly using `gemini-3.8-flash` and identifies what is wrong with the skin without recommending products.
+  - GECX Front-End Project (`--gecx-project-id`): Hosts the Multi-Flow GECX App (`ces.googleapis.com`)
+    with `lumiere_concierge_root_agent`, `lumiere_shopping_agent`, `skin_diagnosis_agent` (delegating
+    visual diagnosis to the ADK Agent), and a separate GECX sub-agent `lumiere_product_recommendation_agent`
+    that recommends products based on the ADK clinical diagnosis.
 """
 
 from __future__ import annotations
@@ -34,7 +37,6 @@ REQUIRED_APIS = [
     "iam.googleapis.com",
     "compute.googleapis.com",
     "artifactregistry.googleapis.com",
-    "run.googleapis.com",
     "aiplatform.googleapis.com",
     "ces.googleapis.com",
     "cloudtrace.googleapis.com",
@@ -46,7 +48,7 @@ REQUIRED_APIS = [
 
 def enable_apis(project_number: str, headers: dict[str, str], apis: list[str] | None = None) -> None:
     target_apis = apis or REQUIRED_APIS
-    print(f"[1/7] Enabling required GCP APIs on project #{project_number}...")
+    print(f"[1/6] Enabling required GCP APIs on project #{project_number}...")
     r = requests.post(
         f"https://serviceusage.googleapis.com/v1/projects/{project_number}/services:batchEnable",
         headers=headers,
@@ -61,8 +63,8 @@ def enable_apis(project_number: str, headers: dict[str, str], apis: list[str] | 
 
 
 def configure_iam(project_id: str, project_number: str, headers: dict[str, str]) -> None:
-    print(f"[2/7] Provisioning Service Identities and runtime IAM bindings in Agent Host project '{project_id}'...")
-    for svc in ("aiplatform.googleapis.com", "run.googleapis.com", "ces.googleapis.com"):
+    print(f"[2/6] Provisioning Service Identities and runtime IAM bindings in Agent Host project '{project_id}'...")
+    for svc in ("aiplatform.googleapis.com", "ces.googleapis.com"):
         requests.post(
             f"https://serviceusage.googleapis.com/v1beta1/projects/{project_number}/services/{svc}:generateServiceIdentity",
             headers=headers,
@@ -76,7 +78,6 @@ def configure_iam(project_id: str, project_number: str, headers: dict[str, str])
     ]
     roles = [
         "roles/aiplatform.user",
-        "roles/run.invoker",
         "roles/cloudtrace.agent",
         "roles/telemetry.tracesWriter",
         "roles/logging.logWriter",
@@ -253,7 +254,7 @@ def configure_least_privilege_cross_project_auth(
 
 
 def ensure_artifact_repo(project_id: str, project_number: str, region: str, repo_name: str, headers: dict[str, str]) -> None:
-    print(f"[3/7] Ensuring Artifact Registry repository '{repo_name}' in {region}...")
+    print(f"[3/6] Ensuring Artifact Registry repository '{repo_name}' in {region}...")
     repo_url = f"https://artifactregistry.googleapis.com/v1/projects/{project_id}/locations/{region}/repositories/{repo_name}"
     if requests.get(repo_url, headers=headers, timeout=20).status_code != 200:
         r_c = requests.post(
@@ -304,65 +305,6 @@ def stage_py311_deps(cache_dir: Path = Path("/tmp/py311_adk_deps")) -> Path:
     return cache_dir
 
 
-def deploy_cloud_run_api(
-    project_id: str, project_number: str, region: str, service_name: str, image_uri: str, model_name: str, headers: dict[str, str]
-) -> str:
-    print(f"[5/7] Deploying Tier 3 Cloud Run Skincare Vision API '{service_name}' ({model_name})...")
-    parent = f"projects/{project_id}/locations/{region}"
-    svc_url = f"https://run.googleapis.com/v2/{parent}/services/{service_name}"
-    body = {
-        "ingress": "INGRESS_TRAFFIC_ALL",
-        "template": {
-            "scaling": {"minInstanceCount": 0, "maxInstanceCount": 5},
-            "timeout": "120s",
-            "containers": [
-                {
-                    "image": image_uri,
-                    "resources": {"limits": {"cpu": "2", "memory": "1Gi"}},
-                    "env": [
-                        {"name": "GCP_PROJECT_ID", "value": project_id},
-                        {"name": "GOOGLE_CLOUD_PROJECT", "value": project_id},
-                        {"name": "GOOGLE_CLOUD_LOCATION", "value": "global"},
-                        {"name": "VISION_MODEL", "value": model_name},
-                    ],
-                }
-            ],
-        },
-    }
-    r = (
-        requests.patch(svc_url, headers=headers, json=body, timeout=30)
-        if requests.get(svc_url, headers=headers, timeout=20).status_code == 200
-        else requests.post(f"https://run.googleapis.com/v2/{parent}/services?serviceId={service_name}", headers=headers, json=body, timeout=30)
-    )
-    r.raise_for_status()
-    if op_name := r.json().get("name"):
-        for _ in range(60):
-            if requests.get(f"https://run.googleapis.com/v2/{op_name}", headers=headers, timeout=20).json().get("done"):
-                break
-            time.sleep(3)
-    uri = requests.get(svc_url, headers=headers, timeout=20).json()["uri"]
-    requests.post(
-        f"{svc_url}:setIamPolicy",
-        headers=headers,
-        json={
-            "policy": {
-                "bindings": [
-                    {
-                        "role": "roles/run.invoker",
-                        "members": [
-                            f"serviceAccount:{project_number}-compute@developer.gserviceaccount.com",
-                            f"serviceAccount:service-{project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com",
-                        ],
-                    }
-                ]
-            }
-        },
-        timeout=20,
-    )
-    print(f"  -> Cloud Run API live at: {uri}")
-    return uri
-
-
 def _wait_re_op(region: str, op_name: str, headers: dict[str, str]) -> tuple[bool, dict[str, Any]]:
     for _ in range(120):
         data = requests.get(f"https://{region}-aiplatform.googleapis.com/v1beta1/{op_name}", headers=headers, timeout=20).json()
@@ -373,9 +315,9 @@ def _wait_re_op(region: str, op_name: str, headers: dict[str, str]) -> tuple[boo
 
 
 def deploy_adk_agent_runtime(
-    project_id: str, project_number: str, region: str, display_name: str, image_uri: str, api_url: str, model_name: str, headers: dict[str, str]
+    project_id: str, project_number: str, region: str, display_name: str, image_uri: str, model_name: str, headers: dict[str, str]
 ) -> str:
-    print(f"[6/7] Deploying Tier 2 ADK Agent '{display_name}' on Vertex AI Agent Runtime...")
+    print(f"[5/6] Deploying ADK Agent '{display_name}' on Vertex AI Agent Runtime...")
     base_url = f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{project_id}/locations/{region}/reasoningEngines"
     engines = requests.get(base_url, headers=headers, timeout=20).json().get("reasoningEngines", [])
     existing = next((e for e in engines if e.get("displayName") == display_name), None)
@@ -389,7 +331,6 @@ def deploy_adk_agent_runtime(
             {"name": "GCP_PROJECT_NUMBER", "value": project_number},
             {"name": "AGENT_ENGINE_LOCATION", "value": region},
             {"name": "ADK_MODEL_NAME", "value": model_name},
-            {"name": "SKINCARE_API_URL", "value": api_url},
             {"name": "CONTAINER_REVISION_TS", "value": str(int(time.time()))},
         ]
         if engine_id:
@@ -398,8 +339,9 @@ def deploy_adk_agent_runtime(
 
     class_methods = [{"name": "query", "api_mode": ""}, {"name": "handle_a2a", "api_mode": "a2a_extension"}]
     engine_desc = (
-        "Google ADK Skincare Specialist Agent (gemini-3.8-flash) deployed on Vertex AI "
-        "Agent Runtime calling the Cloud Run Skincare Vision API (gemini-3.8-flash)."
+        "Google ADK Clinical Skin Diagnosis Agent (gemini-3.8-flash) deployed on Vertex AI "
+        "Agent Runtime that analyzes uploaded skin images and identifies what is wrong with the skin "
+        "without recommending actual products."
     )
     engine_id = existing["name"].split("/")[-1] if existing else ""
 
@@ -469,11 +411,10 @@ def teardown_stack(
     gecx_project_id: str,
     region: str,
     repo_name: str,
-    service_name: str,
     adk_display_name: str,
     headers: dict[str, str],
 ) -> None:
-    """Deletes all GECX, Vertex AI Agent Runtime, Cloud Run, and Artifact Registry resources for this blueprint."""
+    """Deletes all GECX, Vertex AI Agent Runtime, and Artifact Registry resources for this blueprint."""
     for p in dict.fromkeys([gecx_project_id, project_id]):
         print(f"Tearing down GECX apps in project '{p}'...")
         teardown_gecx_apps(p, headers)
@@ -486,22 +427,18 @@ def teardown_stack(
             r_del_re = requests.delete(f"https://{region}-aiplatform.googleapis.com/v1beta1/{re_name}?force=true", headers=headers, timeout=20)
             print(f"  -> Deleted ReasoningEngine {re_name} (HTTP {r_del_re.status_code})")
 
-    r_del_cr = requests.delete(f"https://run.googleapis.com/v2/projects/{project_id}/locations/{region}/services/{service_name}", headers=headers, timeout=20)
-    print(f"  -> Deleted Cloud Run service {service_name} (HTTP {r_del_cr.status_code})")
-
     r_del_ar = requests.delete(f"https://artifactregistry.googleapis.com/v1/projects/{project_id}/locations/{region}/repositories/{repo_name}", headers=headers, timeout=20)
     print(f"  -> Deleted Artifact Registry repository {repo_name} (HTTP {r_del_ar.status_code})")
 
 
 def main() -> None:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Deploy or Teardown GECX + ADK Agent Runtime + Cloud Run Blueprint.")
-    parser.add_argument("--project-id", default=os.environ.get("GCP_PROJECT_ID", ""), help="Agent Host Project ID (Cloud Run + ADK Agent Runtime)")
+    parser = argparse.ArgumentParser(description="Deploy or Teardown 2-Tier GECX + ADK Agent Runtime Blueprint.")
+    parser.add_argument("--project-id", default=os.environ.get("GCP_PROJECT_ID", ""), help="Agent Host Project ID (ADK Agent Runtime)")
     parser.add_argument("--gecx-project-id", default=os.environ.get("GECX_PROJECT_ID", ""), help="Optional separate GECX Front-End Project ID (defaults to --project-id)")
     parser.add_argument("--region", default=os.environ.get("GCP_REGION", "europe-west1"))
     parser.add_argument("--ces-location", default=os.environ.get("CES_LOCATION", "us"))
     parser.add_argument("--artifact-repo", default=os.environ.get("ARTIFACT_REPO_NAME", "gecx-skincare-repo"))
-    parser.add_argument("--api-service-name", default=os.environ.get("SKINCARE_API_SERVICE_NAME", "skincare-vision-api"))
     parser.add_argument("--adk-display-name", default=os.environ.get("ADK_AGENT_DISPLAY_NAME", "lumiere-skincare-adk-agent-runtime"))
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME", "gemini-3.8-flash"))
     parser.add_argument("--teardown", action="store_true", help="Delete all blueprint resources from the project(s)")
@@ -514,7 +451,7 @@ def main() -> None:
     gecx_project_id = args.gecx_project_id or args.project_id
     headers = get_auth_headers(args.account)
     if args.teardown:
-        teardown_stack(args.project_id, gecx_project_id, args.region, args.artifact_repo, args.api_service_name, args.adk_display_name, headers)
+        teardown_stack(args.project_id, gecx_project_id, args.region, args.artifact_repo, args.adk_display_name, headers)
         return
 
     project_number = get_project_number(args.project_id, args.account)
@@ -523,34 +460,28 @@ def main() -> None:
     enable_apis(project_number, headers)
     if gecx_project_id != args.project_id:
         enable_apis(gecx_project_number, headers, apis=["serviceusage.googleapis.com", "cloudresourcemanager.googleapis.com", "iam.googleapis.com", "ces.googleapis.com", "logging.googleapis.com"])
-        # Remove any legacy GECX apps from the Agent Host project so roles are cleanly separated
         teardown_gecx_apps(args.project_id, headers)
 
     configure_iam(args.project_id, project_number, headers)
     ensure_artifact_repo(args.project_id, project_number, args.region, args.artifact_repo, headers)
 
-    print("[4/7] Building and pushing OCI container images to Artifact Registry...")
+    print("[4/6] Building and pushing ADK Agent OCI container image to Artifact Registry...")
     sp_dir = stage_py311_deps()
-    api_img = build_and_push_oci(
-        args.project_id, args.region, args.artifact_repo, args.api_service_name,
-        "skincare_api.app:app", sp_dir, [(REPO_ROOT / "skincare_api" / "app.py", "app/skincare_api/app.py")], account=args.account,
-    )
     adk_img = build_and_push_oci(
         args.project_id, args.region, args.artifact_repo, "skincare-adk-agent",
         "skincare_adk_agent.server:app", sp_dir,
         [(REPO_ROOT / "skincare_adk_agent" / "agent.py", "app/skincare_adk_agent/agent.py"),
          (REPO_ROOT / "skincare_adk_agent" / "server.py", "app/skincare_adk_agent/server.py")],
-        mount_from=args.api_service_name, account=args.account,
+        account=args.account,
     )
 
-    api_url = deploy_cloud_run_api(args.project_id, project_number, args.region, args.api_service_name, api_img, args.model, get_auth_headers(args.account))
-    engine_id = deploy_adk_agent_runtime(args.project_id, project_number, args.region, args.adk_display_name, adk_img, api_url, args.model, get_auth_headers(args.account))
+    engine_id = deploy_adk_agent_runtime(args.project_id, project_number, args.region, args.adk_display_name, adk_img, args.model, get_auth_headers(args.account))
 
     caller_sa = configure_least_privilege_cross_project_auth(
         args.project_id, gecx_project_id, gecx_project_number, args.region, engine_id, get_auth_headers(args.account)
     )
 
-    print(f"[7/7] Provisioning Tier 1 GECX Application in '{gecx_project_id}' ({args.ces_location}) and running E2E verification...")
+    print(f"[6/6] Provisioning GECX Application in '{gecx_project_id}' ({args.ces_location}) and running E2E verification...")
     locations = ["us", "eu"] if args.ces_location.lower() == "both" else [args.ces_location]
     gecx_list = [
         setup_gecx_app(gecx_project_id, project_number, args.region, engine_id, loc, caller_service_account=caller_sa, account=args.account)
@@ -572,7 +503,6 @@ def main() -> None:
             {
                 "agent_host_project_id": args.project_id,
                 "gecx_frontend_project_id": gecx_project_id,
-                "cloud_run_api": api_url,
                 "agent_runtime_id": engine_id,
                 "least_privilege_caller_sa": caller_sa,
                 "least_privilege_custom_role": f"projects/{args.project_id}/roles/singleAgentInvoker",

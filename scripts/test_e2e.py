@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Live 4-Turn End-to-End Verification for Multi-Flow GECX -> ADK Agent Runtime -> Cloud Run API.
+"""Live 4-Turn End-to-End Verification for 2-Tier Multi-Flow GECX + ADK Agent Runtime.
 
-Verifies both distinct GECX user-journey flows and strict separation of responsibilities:
+Verifies both distinct GECX user-journey flows and the separate GECX Product Recommendation Sub-Agent:
   - Turn 1 (Root Concierge): General store policy FAQ handled directly by `lumiere_concierge_root_agent`.
   - Turn 2 (Flow 1 - Shopping Journey): Routes to `lumiere_shopping_agent` and calls `shop_lumiere_catalog`.
-  - Turn 3 (Flow 2 - Skin Analysis Journey, No Image): Routes directly to `skin_analysis_recommendation_agent`;
+  - Turn 3 (Flow 2, Stage 1 - Skin Diagnosis Journey, No Image): Routes directly to `skin_diagnosis_agent`;
     conditional gate blocks ADK delegation & GECX product recommendation and calls `request_skin_image_upload`.
-  - Turn 4 (Flow 2 - Skin Analysis Journey, Image Uploaded):
-      1. `skincare_adk_agent_runtime_tool` (ADK Agent Runtime -> Cloud Run Gemini 3.8 Flash Vision API)
-         returns ONLY the clinical visual skin diagnosis (zero product SKUs).
-      2. `recommend_lumiere_products` (GECX tool on `skin_analysis_recommendation_agent`) takes the
-         ADK clinical findings and recommends the matched Lumiere products inside GECX.
+  - Turn 4 (Flow 2, Stage 1 -> Stage 2 - Image Uploaded):
+      1. `skin_diagnosis_agent` calls `skincare_adk_agent_runtime_tool` (ADK Agent on Vertex AI Agent Runtime
+         using `gemini-3.8-flash`), which identifies what is wrong with the skin and returns ONLY the clinical
+         visual skin diagnosis (zero commercial product SKUs).
+      2. `skin_diagnosis_agent` transfers control (`transfer->...`) to the separate GECX sub-agent
+         `lumiere_product_recommendation_agent`.
+      3. `lumiere_product_recommendation_agent` calls `recommend_lumiere_products` to match the ADK clinical
+         findings to Lumiere catalog SKUs and present the personalized AM/PM routine.
 """
 
 from __future__ import annotations
@@ -104,17 +107,17 @@ def run_e2e_test(
     print(f"  [Turn 2 Shopping Preview]: {t2_text[:200]}...")
     assert "shop_lumiere_catalog" in t2_tools
 
-    # Turn 3: Flow 2 — Skin Analysis Journey WITHOUT an image (Conditional gate blocks ADK & GECX recommendation)
+    # Turn 3: Flow 2 (Stage 1) — Skin Diagnosis Journey WITHOUT an image (Conditional gate requests photo)
     _, t3_tools, _ = _run_turn(
         session_name,
         [{"text": "Before I check out, my cheeks are red and flaky. Can you analyze my skin condition and recommend products?"}],
         headers,
     )
-    print(f"  [Turn 3 - Flow 2: Skin Analysis (No Image Uploaded)] Actions: {t3_tools}")
+    print(f"  [Turn 3 - Flow 2 (Stage 1): Skin Diagnosis (No Image Uploaded)] Actions: {t3_tools}")
     assert "skincare_adk_agent_runtime_tool" not in t3_tools
     assert "recommend_lumiere_products" not in t3_tools
 
-    # Turn 4: Flow 2 — Skincare image uploaded -> (1) ADK Visual Diagnosis -> (2) GECX Product Recommendation
+    # Turn 4: Flow 2 (Stage 1 -> Stage 2) — Image uploaded -> ADK Visual Diagnosis -> Handoff to Separate GECX Product Recommendation Sub-Agent
     t4_text, t4_tools, t4_outputs = _run_turn(
         session_name,
         [
@@ -123,10 +126,15 @@ def run_e2e_test(
         ],
         headers,
     )
-    print(f"  [Turn 4 - Flow 2: Image Uploaded -> ADK Diagnosis + GECX Product Recommendation] Actions: {t4_tools}")
+    print(f"  [Turn 4 - Flow 2: Image Uploaded -> ADK Diagnosis -> Handoff to Product Recommendation Sub-Agent] Actions: {t4_tools}")
     print(f"  [Turn 4 Response Preview]: {t4_text[:280]}...")
     assert "skincare_adk_agent_runtime_tool" in t4_tools, f"Expected ADK diagnosis tool in {t4_tools}"
+    assert any(a.startswith("transfer->") for a in t4_tools), f"Expected handoff transfer to lumiere_product_recommendation_agent in {t4_tools}"
     assert "recommend_lumiere_products" in t4_tools, f"Expected GECX recommend_lumiere_products tool in {t4_tools}"
+
+    adk_raw_output = str(t4_outputs.get("skincare_adk_agent_runtime_tool", ""))
+    for sku in ("CLN-CICA-01", "TRM-AZEL-05", "SRM-NIAC-02", "CLN-BHA-03", "SPF-MIN-04", "LUM-"):
+        assert sku not in adk_raw_output, f"ADK Agent output must not contain product SKU {sku}: {adk_raw_output}"
 
     r_sess = requests.get(
         f"https://{region}-aiplatform.googleapis.com/v1beta1/projects/{host_proj}/locations/{region}/reasoningEngines/{reasoning_engine_id}/sessions",
@@ -164,8 +172,8 @@ def run_e2e_test(
         "turn_1_faq_actions": t1_tools,
         "turn_2_shopping_flow_actions": t2_tools,
         "turn_3_no_image_gate_actions": t3_tools,
-        "turn_4_image_adk_and_gecx_actions": t4_tools,
-        "adk_diagnosis_output_preview": str(t4_outputs.get("skincare_adk_agent_runtime_tool", ""))[:240],
+        "turn_4_image_adk_and_gecx_subagent_actions": t4_tools,
+        "adk_diagnosis_output_preview": adk_raw_output[:240],
         "gecx_recommendation_output_preview": str(t4_outputs.get("recommend_lumiere_products", ""))[:240],
         "agent_engine_sessions": sess_count,
         "agent_engine_traces": trace_count,
