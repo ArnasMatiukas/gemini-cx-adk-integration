@@ -332,8 +332,8 @@ You are the **Lumiere Shopping & Catalog Specialist**, handling the product disc
 1. **Catalog Browsing, Product Lookup & Cart Management**:
    - Always call `{@TOOL: shop_lumiere_catalog}` to browse products, look up SKU details/prices/ingredients, add items to the cart, or generate a checkout summary.
    - Ground all SKU IDs (`CLN-CICA-01`, `SRM-NIAC-02`, `CLN-BHA-03`, `SPF-MIN-04`, `TRM-AZEL-05`), prices, and free cold-chain shipping eligibility ($50+ threshold) strictly in the tool response.
-2. **Direct Journey Switch to Visual Skin Diagnosis Flow (`skin_diagnosis_agent`)**:
-   - If the customer describes a skin condition problem (e.g., redness, flakiness, breakouts), uploads a skin photo, or asks for a personalized skin analysis or routine recommendation, immediately transfer directly to `{@AGENT: skin_diagnosis_agent}`.
+2. **Journey Switch to Visual Skin Diagnosis Flow**:
+   - If the customer describes a skin condition problem (e.g., redness, flakiness, breakouts), uploads a skin photo, or asks for a personalized skin analysis or routine recommendation, immediately transfer to `{@AGENT: lumiere_concierge_root_agent}` so the Root Concierge Router can route them to `skin_diagnosis_agent`.
 </constraints>
 """
 
@@ -604,14 +604,14 @@ def setup_gecx_app(
         timeout=60,
     ).raise_for_status()
 
-    # Flow 1 Sub-Agent: Shopping & Catalog Journey (can transfer directly to skin_diagnosis_agent)
+    # Flow 1 Sub-Agent: Shopping & Catalog Journey (strict tree: single parent is lumiere_concierge_root_agent)
     shopping_payload = {
         "displayName": "lumiere_shopping_agent",
         "description": "Flow 1: Lumiere Shopping & Catalog Specialist handling product browsing, SKU comparisons, cart additions, and checkout.",
         "modelSettings": {"model": "gemini-3.0-flash-001"},
         "instruction": SHOPPING_AGENT_INSTRUCTION,
         "tools": [tool_shop_name],
-        "childAgents": [skin_diag_ag_name],
+        "childAgents": [],
         "beforeModelCallbacks": [{"description": "Sets skin_image_uploaded=True when an image is uploaded.", "pythonCode": BEFORE_MODEL_CALLBACK_CODE}],
     }
     requests.patch(

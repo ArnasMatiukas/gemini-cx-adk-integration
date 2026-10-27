@@ -43,7 +43,6 @@ flowchart LR
 
         Root -- "Shopping / Cart Intent" --> ShopAgent
         Root -- "Skin Photo / Diagnosis Intent" --> SkinDiagAgent
-        ShopAgent -- "Switch to Skin Diagnosis" --> SkinDiagAgent
     end
 
     subgraph ProjB ["Project B: Agent Host Project (Vertex AI Agent Runtime)"]
