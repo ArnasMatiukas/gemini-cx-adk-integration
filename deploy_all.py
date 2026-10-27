@@ -225,29 +225,38 @@ def configure_least_privilege_cross_project_auth(
     )
     r_re_iam.raise_for_status()
 
-    # Ensure zero project-level IAM bindings exist in Agent Host Project for the GECX caller SA or CES P4SA
+    # 4. Also bind `singleAgentInvoker` in Agent Host Project IAM with an IAM Condition locked to this single
+    #    ReasoningEngine so the principal + single-agent lock is visible in Cloud Console -> IAM & Admin -> IAM.
     host_policy = requests.post(
         f"https://cloudresourcemanager.googleapis.com/v1/projects/{agent_host_project_id}:getIamPolicy",
         headers=headers,
-        json={},
+        json={"options": {"requestedPolicyVersion": 3}},
         timeout=20,
     ).json()
+    host_policy["version"] = 3
     disallowed_project_members = {f"serviceAccount:{caller_sa_email}", ces_p4sa}
     cleaned_bindings = []
-    modified = False
     for b in host_policy.get("bindings", []):
         kept = [m for m in b.get("members", []) if m not in disallowed_project_members]
-        if len(kept) != len(b.get("members", [])):
-            modified = True
         if kept:
             cleaned_bindings.append({**b, "members": kept})
-    if modified:
-        requests.post(
-            f"https://cloudresourcemanager.googleapis.com/v1/projects/{agent_host_project_id}:setIamPolicy",
-            headers=headers,
-            json={"policy": {**host_policy, "bindings": cleaned_bindings}},
-            timeout=20,
-        )
+    cleaned_bindings.append(
+        {
+            "role": role_name,
+            "members": [f"serviceAccount:{caller_sa_email}"],
+            "condition": {
+                "title": "Lock to Single Skincare ADK ReasoningEngine",
+                "description": f"Grants access ONLY to ReasoningEngine {engine_id} in {agent_host_project_id}.",
+                "expression": f'resource.name.endsWith("/locations/{region}/reasoningEngines/{engine_id}")',
+            },
+        }
+    )
+    requests.post(
+        f"https://cloudresourcemanager.googleapis.com/v1/projects/{agent_host_project_id}:setIamPolicy",
+        headers=headers,
+        json={"policy": {**host_policy, "bindings": cleaned_bindings}},
+        timeout=20,
+    ).raise_for_status()
 
     print(f"  -> Bound '{role_name}' exclusively on ReasoningEngine '{engine_id}' for '{caller_sa_email}'")
     return caller_sa_email
